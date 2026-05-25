@@ -1,0 +1,20 @@
+# Outputs (keep structure, not data)
+outputs/raw/
+outputs/processed/
+outputs/results/*.pkl
+outputs/logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Environments
+.env
+*.conda
+
+# OS
+.DS_Store
+Thumbs.db

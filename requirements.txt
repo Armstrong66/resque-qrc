@@ -1,0 +1,39 @@
+# ResQue QRC — GIC 2026
+# Generated from codebase analysis.
+# Install in conda env: pip install -r requirements.txt
+
+# ── Core scientific stack ─────────────────────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+
+# ── Quantum ───────────────────────────────────────────────────────────────────
+pennylane>=0.38.0
+pennylane-lightning>=0.38.0      # GPU-accelerated simulator (RTX workstation)
+
+# ── Deep learning (LSTM/GRU baselines) ───────────────────────────────────────
+torch>=2.2.0                     # CPU+GPU; CUDA wheels installed automatically
+                                 # on RTX via: conda install pytorch torchvision
+                                 #             torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+
+# ── Classical time-series baselines ──────────────────────────────────────────
+statsmodels>=0.14.0
+pmdarima>=2.0.4                  # Auto-ARIMA
+
+# ── Data access & storage ─────────────────────────────────────────────────────
+requests>=2.31.0
+pyarrow>=14.0.0                  # Parquet read/write
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+tqdm>=4.66.0
+pyyaml>=6.0.1
+
+# ── Optional: qBraid platform (install when running on qBraid Lab) ────────────
+# qbraid>=0.8.0
+# qbraid-sdk>=0.8.0
+# bloqade>=0.15.0                # QuEra Aquila — install separately on qBraid Lab
