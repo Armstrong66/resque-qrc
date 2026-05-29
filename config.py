@@ -16,12 +16,12 @@ LOGS      = ROOT / "outputs" / "logs"
 # ── Dataset ───────────────────────────────────────────────────────────────────
 # PRIMARY STATION — change STATION_ID + STATION_NAME to switch location.
 # African stations (NOAA ISD, same URL pattern, no API key):
-#   Addis Ababa Bole, Ethiopia  → "63401099999"  (Horn of Africa, MAM/OND rains) ← ACTIVE
+#   Addis Ababa Bole, Ethiopia  → "63450099999"  (Horn of Africa, MAM/OND rains) ← ACTIVE
 #   Nairobi Wilson, Kenya       → "63740099999"  (East Africa)
-#   Dakar Yoff, Senegal         → "61641099999"  (Sahel / West African monsoon)
+#   Dakar Yoff, Senegal         → "61660099999"  (Sahel / West African monsoon)
 # North American reference (data-rich, use for sanity checks):
 #   Chicago O'Hare, USA         → "72530094846"
-STATION_ID   = "63401099999"          # Addis Ababa Bole: USAF=634010 + WBAN=99999 (Horn of Africa, MAM/OND seasonal cycle)
+STATION_ID   = "63450099999"          # Addis Ababa Bole: USAF=634010 + WBAN=99999 (Horn of Africa, MAM/OND seasonal cycle)
 STATION_NAME = "AddisAbaba_Bole"
 YEARS        = list(range(2018, 2025)) # 2018–2024 inclusive
 NOAA_URL     = "https://www.ncei.noaa.gov/data/global-hourly/access/{year}/{station}.csv"

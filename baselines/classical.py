@@ -107,29 +107,43 @@ def run_arima(y_train: np.ndarray, y_val: np.ndarray, y_test: np.ndarray,
     for t in range(n_targets):
         logger.info(f"  ARIMA fitting target: {target_names[t]}")
         try:
-            model = auto_arima(y_train[:, t], stepwise=True, seasonal=False,
+            # Drop NaNs from training series before fitting
+            train_t = y_train[:, t]
+            nan_mask = np.isnan(train_t)
+            nan_pct = nan_mask.mean() * 100
+            if nan_pct > 50:
+                logger.warning(f"  Skipping ARIMA for {target_names[t]}: "
+                                f"{nan_pct:.1f}% missing — too sparse to fit reliably")
+                pred_val[:, t]  = np.nanmean(train_t)
+                pred_test[:, t] = np.nanmean(train_t)
+                continue
+            train_clean = train_t[~nan_mask]
+
+            model = auto_arima(train_clean, stepwise=True, seasonal=False,
                                error_action="ignore", suppress_warnings=True,
                                max_p=5, max_q=5)
             orders[target_names[t]] = str(model.order)
 
-            # Walk-forward forecast on val
-            history = list(y_train[:, t])
+            # Walk-forward forecast on val — fill NaN targets with last prediction
             for i in range(len(y_val)):
                 fc = model.predict(1)[0]
                 pred_val[i, t] = fc
-                history.append(y_val[i, t])
-                model.update([y_val[i, t]])
+                obs = y_val[i, t]
+                if not np.isnan(obs):
+                    model.update([obs])
 
             # Walk-forward on test
             for i in range(len(y_test)):
                 fc = model.predict(1)[0]
                 pred_test[i, t] = fc
-                model.update([y_test[i, t]])
+                obs = y_test[i, t]
+                if not np.isnan(obs):
+                    model.update([obs])
 
         except Exception as e:
             logger.error(f"  ARIMA failed for {target_names[t]}: {e}")
-            pred_val[:, t]  = y_train[-1, t]
-            pred_test[:, t] = y_train[-1, t]
+            pred_val[:, t]  = np.nanmean(y_train[:, t])
+            pred_test[:, t] = np.nanmean(y_train[:, t])
 
     from evaluation.metrics import rmse_per_target
     return BaselineResult(
@@ -307,7 +321,8 @@ def run_rnn(X_train: np.ndarray, y_train: np.ndarray,
     loss_fn = nn.MSELoss()
 
     best_val_loss = float("inf")
-    best_state    = None
+    # Initialise immediately so early-stop on epoch 1 never leaves this as None
+    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
     patience, no_improve = 10, 0
 
     for epoch in range(RNN_EPOCHS):

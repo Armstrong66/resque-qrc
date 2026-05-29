@@ -291,11 +291,12 @@ def run_pipeline(args):
 
     for h_val, ds in datasets.items():
         try:
+            # Pass full arrays — metrics.py now handles alignment internally
             build_results_table(
-                results      = all_results,
-                y_true_val   = ds.y_val[:min(len(ds.y_val), 1000)],
-                y_true_test  = ds.y_test[:min(len(ds.y_test), 1000)],
-                target_names = TARGETS,
+                results       = all_results,
+                y_true_val    = ds.y_val,
+                y_true_test   = ds.y_test,
+                target_names  = TARGETS,
                 horizon_hours = h_val,
                 out_dir       = RESULTS,
             )

@@ -65,10 +65,6 @@ def _ising_evolution_circuit(n_qubits: int,
     Measure: ⟨σᶻᵢ⟩ and ⟨σˣᵢ⟩ for all qubits.
     """
     dev = _get_device(n_qubits, noise_rate)
-    obs_list = (
-        [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)] +
-        [qml.expval(qml.PauliX(i)) for i in range(n_qubits)]
-    )
 
     # Augment input with feedback
     if prev_zexp is not None and USE_FEEDBACK:
@@ -96,10 +92,8 @@ def _ising_evolution_circuit(n_qubits: int,
         # ── Trotter evolution of Ising Hamiltonian ───────────────────────────
         dt = evolution_time / trotter_steps
         for _ in range(trotter_steps):
-            # ZZ couplings
             for (i, j) in pairs:
                 qml.IsingZZ(-2 * J * dt, wires=[i, j])
-            # Transverse field (X rotations)
             for i in range(n_qubits):
                 qml.RX(-2 * h * dt, wires=i)
 
@@ -108,7 +102,11 @@ def _ising_evolution_circuit(n_qubits: int,
             for i in range(n_qubits):
                 qml.DepolarizingChannel(noise_rate, wires=i)
 
-        return obs_list
+        # ── Measurements: build obs_list INSIDE circuit body (PennyLane ≥0.38)
+        return (
+            [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)] +
+            [qml.expval(qml.PauliX(i)) for i in range(n_qubits)]
+        )
 
     return circuit()
 

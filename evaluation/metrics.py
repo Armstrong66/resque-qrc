@@ -91,15 +91,22 @@ def build_results_table(results: dict,
         pred_test = getattr(result, "y_pred_test", None)
 
         if pred_val is None:
-            # ReadoutResult — need to recompute from W
             logger.warning(f"No y_pred stored for {name}; skipping metrics row")
             continue
 
-        val_rmse  = rmse_per_target(y_true_val,  pred_val)
-        test_rmse = rmse_per_target(y_true_test, pred_test)
-        val_mae   = mae_per_target(y_true_val,   pred_val)
-        test_mae  = mae_per_target(y_true_test,  pred_test)
-        vpt       = valid_prediction_time(y_true_test, pred_test, horizon_hours)
+        # Align lengths — warmup trimming can produce off-by-one differences
+        n_val  = min(len(y_true_val),  len(pred_val))
+        n_test = min(len(y_true_test), len(pred_test))
+        y_true_val_  = y_true_val[:n_val]
+        pred_val_    = pred_val[:n_val]
+        y_true_test_ = y_true_test[:n_test]
+        pred_test_   = pred_test[:n_test]
+
+        val_rmse  = rmse_per_target(y_true_val_,  pred_val_)
+        test_rmse = rmse_per_target(y_true_test_, pred_test_)
+        val_mae   = mae_per_target(y_true_val_,   pred_val_)
+        test_mae  = mae_per_target(y_true_test_,  pred_test_)
+        vpt       = valid_prediction_time(y_true_test_, pred_test_, horizon_hours)
 
         row = {"model": name}
         for t, tname in enumerate(target_names):
