@@ -51,7 +51,7 @@ print(f'Downloaded {len(paths)} files')
 "
 ```
 **What it does:** Downloads NOAA ISD global-hourly CSV files for station
-72530094728 (Addis Ababa Bole, Ethiopia), years 2018–2024, to `outputs/raw/AddisAbaba_Bole/`.
+63401099999 (Addis Ababa Bole, Ethiopia), years 2018–2024, to `outputs/raw/AddisAbaba_Bole/`.
 No API key required. Skips existing files automatically.
 
 ---

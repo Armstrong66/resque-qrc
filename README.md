@@ -1,7 +1,7 @@
 # ResQue — Warm-Start QRC for Multi-Output Atmospheric Forecasting
 ### GIC 2026 | Dynamic Systems Forecasting | Track B: Weather
 
-[![Launch on qBraid](https://qbraid-static.s3.amazonaws.com/logos/Launch_on_qBraid_white.png)](https://account.qbraid.com?gitHubUrl=https://github.com/YOUR-ORG/resque-qrc)
+[![Launch on qBraid](https://qbraid-static.s3.amazonaws.com/logos/Launch_on_qBraid_white.png)](https://account.qbraid.com?gitHubUrl=https://github.com/QCAT/resque-qrc)
 
 ---
 
