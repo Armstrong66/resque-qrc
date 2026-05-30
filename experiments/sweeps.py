@@ -19,27 +19,42 @@ from itertools import product
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (J_SWEEP, H_SWEEP, NOISE_RATES, QUBIT_COUNTS,
-                    SHOT_COUNTS, TOPOLOGIES, TROTTER_STEPS, EVOLUTION_TIME,
-                    RESULTS, RANDOM_SEED)
+                    SHOT_COUNTS, TOPOLOGIES, RESULTS, RANDOM_SEED, QRC_WARMUP,
+                    SWEEP_MAX_TRAIN_SAMPLES)
 from utils import get_logger
 
 logger = get_logger(__name__)
 np.random.seed(RANDOM_SEED)
 
 
+def _qrc_warmup(n_samples: int) -> int:
+    return min(QRC_WARMUP, max(0, n_samples // 10))
+
+
+def _subsample_sweep_data(X_train, y_train, X_val, y_val, max_n: int = None):
+    """Use a fixed prefix of train/val for faster sweeps (temporal order preserved)."""
+    max_n = max_n if max_n is not None else SWEEP_MAX_TRAIN_SAMPLES
+    if max_n is None or len(X_train) <= max_n:
+        return X_train, y_train, X_val, y_val
+    logger.info(f"Sweep subsample: using first {max_n}/{len(X_train)} train windows")
+    return X_train[:max_n], y_train[:max_n], X_val, y_val
+
+
 def _quick_eval(qrc, X_train, y_train, X_val, y_val, lambda_=1e-3):
     """Run reservoir and evaluate with ridge regression. Returns val RMSE mean."""
-    from reservoir.quantum_reservoir import IsingQRC
     from readout.ridge_readout import _ridge_solve, _rmse_per_target
 
     try:
-        H_train = qrc.run_sequence(X_train, warmup=min(20, len(X_train) // 10))
-        H_val   = qrc.run_sequence(X_val,   warmup=0)
+        w = _qrc_warmup(len(X_train))
+        H_train = qrc.run_sequence(X_train, warmup=w)
+        H_val   = qrc.run_sequence(X_val, warmup=w)
 
-        min_len = min(len(H_train), len(y_train))
-        H_train, y_tr = H_train[:min_len], y_train[:min_len]
-        min_len = min(len(H_val), len(y_val))
-        H_val,   y_vl = H_val[:min_len],   y_val[:min_len]
+        y_tr = y_train[w:]
+        y_vl = y_val[w:]
+        min_len = min(len(H_train), len(y_tr))
+        H_train, y_tr = H_train[:min_len], y_tr[:min_len]
+        min_len = min(len(H_val), len(y_vl))
+        H_val, y_vl = H_val[:min_len], y_vl[:min_len]
 
         W    = _ridge_solve(H_train, y_tr, lambda_)
         pred = H_val @ W
@@ -64,7 +79,9 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"=== Hamiltonian sweep: {len(J_SWEEP)}×{len(H_SWEEP)} "
+    X_train, y_train, X_val, y_val = _subsample_sweep_data(X_train, y_train, X_val, y_val)
+
+    logger.info(f"=== Hamiltonian sweep: {len(J_SWEEP)}x{len(H_SWEEP)} "
                 f"= {len(J_SWEEP)*len(H_SWEEP)} configs, n_qubits={n_qubits} ===")
 
     rows = []
@@ -72,8 +89,7 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
     best_J, best_h = J_SWEEP[0], H_SWEEP[0]
 
     for J, h in product(J_SWEEP, H_SWEEP):
-        qrc = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topology,
-                       noise_rate=0.0)
+        qrc = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topology, noise_rate=0.0)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         rows.append({"J": J, "h": h, "val_rmse": rmse})
         logger.debug(f"  J={J:.2f} h={h:.2f} → val_rmse={rmse:.4f}")
@@ -209,19 +225,28 @@ def shot_ablation(X_train: np.ndarray, y_train: np.ndarray,
 def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
                           X_val: np.ndarray, y_val: np.ndarray,
                           J: float, h: float, n_qubits: int = 9,
-                          out_dir: Path = None) -> pd.DataFrame:
-    """Compare chain vs all-to-all topology."""
+                          out_dir: Path = None) -> tuple[str, pd.DataFrame]:
+    """Compare chain vs all-to-all topology. Returns (best_topology, df)."""
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    best_rmse = float("inf")
+    best_topo = TOPOLOGIES[0]
+
     for topo in TOPOLOGIES:
         qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topo)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         rows.append({"topology": topo, "val_rmse": rmse})
         logger.info(f"  topology={topo:<12} → val_rmse={rmse:.4f}")
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_topo = topo
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "topology_comparison.csv", index=False)
-    return df
+    with open(out_dir / "best_topology.json", "w") as f:
+        json.dump({"topology_star": best_topo, "val_rmse": best_rmse}, f, indent=2)
+    logger.info(f"Topology sweep done. Best: {best_topo} (val_rmse={best_rmse:.4f})")
+    return best_topo, df

@@ -120,7 +120,8 @@ def inspect_processed(proc_dir: Path) -> dict:
     print("STAGE 2 — Processed Parquet (parsed + resampled)")
     print(SEP)
 
-    parquet_path = proc_dir / f"weather_{RESAMPLE_FREQ}.parquet"
+    from data.parser import processed_parquet_path
+    parquet_path = processed_parquet_path(proc_dir, RESAMPLE_FREQ)
     if not parquet_path.exists():
         print(f"  ✗ Parquet not found: {parquet_path}")
         print(f"    Run pipeline to generate, or run: python data/parser.py")
@@ -147,7 +148,7 @@ def inspect_processed(proc_dir: Path) -> dict:
         print("\n  *** ACTION REQUIRED ***")
         print("  Delete this parquet and re-run with updated parser.py:")
         print(f"    rm {parquet_path}")
-        print("  The parser must apply ffill().bfill() and dropna(how='any')")
+        print("  Rebuild with: python main.py --force_rebuild_data")
     else:
         print("\n  ✓ No NaN in targets — parquet is clean")
 
@@ -187,7 +188,10 @@ def inspect_datasets(proc_dir: Path) -> dict:
 
     results = {}
     for h in HORIZONS:
-        pkl_path = proc_dir / f"dataset_h{h}.pkl"
+        from config import PREPROCESS_VERSION
+        pkl_path = proc_dir / f"dataset_h{h}_{PREPROCESS_VERSION}.pkl"
+        if not pkl_path.exists():
+            pkl_path = proc_dir / f"dataset_h{h}.pkl"
         print(f"\n  Horizon {h}h → {pkl_path.name}")
 
         if not pkl_path.exists():
@@ -255,31 +259,26 @@ def inspect_encoding_bottleneck() -> dict:
     print("STAGE 4 — Encoding bottleneck analysis (QRC vs classical)")
     print(SEP)
 
-    from config import QUBIT_PRIMARY
+    from config import USE_SHARED_PCA, QUBIT_PRIMARY, PCA_COMPONENTS
     window_flat = WINDOW_SIZE * len(TARGETS)
-    qrc_input   = QUBIT_PRIMARY   # angles after np.resize
+    pca_dim = PCA_COMPONENTS or QUBIT_PRIMARY
 
-    print(f"\n  Window size         : {WINDOW_SIZE} steps × {len(TARGETS)} vars "
+    print(f"\n  Window size         : {WINDOW_SIZE} steps x {len(TARGETS)} vars "
           f"= {window_flat} features")
-    print(f"  Classical models    : receive full {window_flat}-dim input")
-    print(f"  QRC (n={QUBIT_PRIMARY})        : np.resize → {qrc_input} angles "
-          f"(compression {window_flat/qrc_input:.0f}×)")
-
-    if qrc_input < window_flat:
-        print(f"\n  ✗ BOTTLENECK ACTIVE — QRC sees only {qrc_input}/{window_flat} "
-              f"features ({100*qrc_input/window_flat:.0f}% of input)")
-        print(f"    Classical baselines have a {window_flat/qrc_input:.0f}× information "
-              f"advantage over QRC.")
-        print(f"    Recommended fix: PCA to {qrc_input} dims for all models, "
-              f"or multi-angle encoding (repeat input across time steps).")
+    print(f"  USE_SHARED_PCA      : {USE_SHARED_PCA}")
+    if USE_SHARED_PCA:
+        print(f"  All reservoir/RNN models: PCA -> {pca_dim}d (train-only, fair)")
+        print(f"\n  OK Shared PCA enabled — no cyclic np.resize bottleneck.")
+        bottleneck = False
     else:
-        print(f"\n  ✓ No bottleneck for n_qubits >= {window_flat}")
+        print(f"  QRC only: np.resize -> {pca_dim} angles")
+        bottleneck = pca_dim < window_flat
 
     return {
         "window_flat_dim": window_flat,
-        "qrc_angles": qrc_input,
-        "compression_ratio": round(window_flat / qrc_input, 1),
-        "bottleneck_active": qrc_input < window_flat,
+        "pca_dim": pca_dim,
+        "use_shared_pca": USE_SHARED_PCA,
+        "bottleneck_active": bottleneck,
     }
 
 
