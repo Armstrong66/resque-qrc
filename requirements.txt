@@ -33,6 +33,9 @@ seaborn>=0.13.0
 tqdm>=4.66.0
 pyyaml>=6.0.1
 
+# ── Development / tests ───────────────────────────────────────────────────────
+pytest>=7.4.0
+
 # ── Optional: qBraid platform (install when running on qBraid Lab) ────────────
 # qbraid>=0.8.0
 # qbraid-sdk>=0.8.0

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Optional, Literal
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import (ESN_HIDDEN_DIM, RNN_HIDDEN, RNN_LAYERS, RNN_EPOCHS,
+from config import (ESN_HIDDEN_DIM, ESN_WARMUP, RNN_HIDDEN, RNN_LAYERS, RNN_EPOCHS,
                     RNN_LR, RNN_BATCH, RESULTS, RANDOM_SEED)
 from utils import get_logger
 
@@ -54,6 +54,7 @@ class BaselineResult:
     val_rmse:     np.ndarray
     test_rmse:    np.ndarray
     meta:         dict
+    label_offset: int = 0   # rows to skip on y_true when scoring (reservoir warmup)
 
     def save(self, out_dir: Path):
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -193,8 +194,9 @@ class EchoStateNetwork:
         logger.debug(f"ESN reservoir: {self.hidden_dim}×{self.hidden_dim} "
                      f"ρ={np.max(np.abs(np.linalg.eigvals(self.W_res_))):.3f}")
 
-    def _run_reservoir(self, X: np.ndarray, warmup: int = 50) -> np.ndarray:
+    def _run_reservoir(self, X: np.ndarray, warmup: int = None) -> np.ndarray:
         """Drive ESN with X (N, n_features). Returns states (N-warmup, hidden_dim)."""
+        warmup = ESN_WARMUP if warmup is None else warmup
         N, n_in = X.shape
         if self.W_in_ is None:
             rng = np.random.default_rng(self.seed)
@@ -210,8 +212,10 @@ class EchoStateNetwork:
         return np.array(states, dtype=np.float32)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
-            warmup: int = 50) -> "EchoStateNetwork":
+            warmup: int = None) -> "EchoStateNetwork":
         """Train linear readout on reservoir states via ridge regression."""
+        warmup = ESN_WARMUP if warmup is None else warmup
+        self._warmup = warmup
         H = self._run_reservoir(X_train, warmup)
         y_trimmed = y_train[warmup:]
         if len(H) != len(y_trimmed):
@@ -225,12 +229,14 @@ class EchoStateNetwork:
                     f"lambda={lam} W_out shape={self.W_out_.shape}")
         return self
 
-    def predict(self, X: np.ndarray, warmup: int = 0) -> np.ndarray:
+    def predict(self, X: np.ndarray, warmup: int = None) -> np.ndarray:
+        warmup = getattr(self, "_warmup", ESN_WARMUP) if warmup is None else warmup
         H = self._run_reservoir(X, warmup)
         return H @ self.W_out_
 
-    def get_reservoir_states(self, X: np.ndarray, warmup: int = 0) -> np.ndarray:
-        """Return raw reservoir states — used for warm-start weight extraction."""
+    def get_reservoir_states(self, X: np.ndarray, warmup: int = None) -> np.ndarray:
+        """Return raw reservoir states — aligned with fit() transient discard."""
+        warmup = getattr(self, "_warmup", ESN_WARMUP) if warmup is None else warmup
         return self._run_reservoir(X, warmup)
 
     def get_readout_weights(self) -> np.ndarray:
@@ -243,22 +249,27 @@ class EchoStateNetwork:
 def run_esn(X_train: np.ndarray, y_train: np.ndarray,
             X_val: np.ndarray, y_val: np.ndarray,
             X_test: np.ndarray, y_test: np.ndarray,
-            hidden_dim: int = None) -> tuple[BaselineResult, EchoStateNetwork]:
+            hidden_dim: int = None,
+            warmup: int = None) -> tuple[BaselineResult, EchoStateNetwork]:
     """Fit and evaluate ESN. Returns (result, fitted_esn) — esn reused for warm-start."""
+    warmup = ESN_WARMUP if warmup is None else warmup
     esn = EchoStateNetwork(hidden_dim=hidden_dim or ESN_HIDDEN_DIM)
-    esn.fit(X_train, y_train)
+    esn.fit(X_train, y_train, warmup=warmup)
 
-    pred_val  = esn.predict(X_val)
-    pred_test = esn.predict(X_test)
+    pred_val  = esn.predict(X_val, warmup=warmup)
+    pred_test = esn.predict(X_test, warmup=warmup)
+    y_val_a   = y_val[warmup:]
+    y_test_a  = y_test[warmup:]
 
     from evaluation.metrics import rmse_per_target
     result = BaselineResult(
         name        = "esn",
         y_pred_val  = pred_val,
         y_pred_test = pred_test,
-        val_rmse    = rmse_per_target(y_val, pred_val),
-        test_rmse   = rmse_per_target(y_test, pred_test),
-        meta        = {"type": "esn", "hidden_dim": esn.hidden_dim},
+        val_rmse    = rmse_per_target(y_val_a, pred_val),
+        test_rmse   = rmse_per_target(y_test_a, pred_test),
+        meta        = {"type": "esn", "hidden_dim": esn.hidden_dim, "warmup": warmup},
+        label_offset= warmup,
     )
     return result, esn
 
@@ -300,11 +311,14 @@ def run_rnn(X_train: np.ndarray, y_train: np.ndarray,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Training {model_type.upper()} on {device}")
 
-    n_features = X_train.shape[1] // window
-    n_targets  = y_train.shape[1]
+    n_targets = y_train.shape[1]
+    flat_dim = window * n_targets
 
     def to_3d(X):
-        return X.reshape(len(X), window, n_features)
+        if X.shape[1] == flat_dim:
+            return X.reshape(len(X), window, n_targets)
+        # PCA-reduced inputs: single timestep, all components as features
+        return X.reshape(len(X), 1, X.shape[1])
 
     # Datasets and loaders
     X_tr = torch.tensor(to_3d(X_train), dtype=torch.float32)
@@ -316,6 +330,7 @@ def run_rnn(X_train: np.ndarray, y_train: np.ndarray,
     train_ds = torch.utils.data.TensorDataset(X_tr, y_tr)
     loader   = torch.utils.data.DataLoader(train_ds, batch_size=RNN_BATCH, shuffle=False)
 
+    n_features = X_tr.shape[2]
     model = _RNNModel(n_features, n_targets, RNN_HIDDEN, RNN_LAYERS, model_type).to(device)
     opt   = torch.optim.Adam(model.parameters(), lr=RNN_LR)
     loss_fn = nn.MSELoss()

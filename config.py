@@ -21,7 +21,7 @@ LOGS      = ROOT / "outputs" / "logs"
 #   Dakar Yoff, Senegal         → "61660099999"  (Sahel / West African monsoon)
 # North American reference (data-rich, use for sanity checks):
 #   Chicago O'Hare, USA         → "72530094846"
-STATION_ID   = "63450099999"          # Addis Ababa Bole: USAF=634010 + WBAN=99999 (Horn of Africa, MAM/OND seasonal cycle)
+STATION_ID   = "63450099999"          # Addis Ababa Bole (NOAA ISD composite id)
 STATION_NAME = "AddisAbaba_Bole"
 YEARS        = list(range(2018, 2025)) # 2018–2024 inclusive
 NOAA_URL     = "https://www.ncei.noaa.gov/data/global-hourly/access/{year}/{station}.csv"
@@ -39,6 +39,18 @@ TRAIN_FRAC      = 0.70
 VAL_FRAC        = 0.15
 TEST_FRAC       = 0.15          # Remainder; no look-ahead leakage enforced
 MAX_INTERP_GAP  = 2             # Max consecutive NaN steps to interpolate
+# Bump when parser/preprocessing logic changes (invalidates cached Parquet)
+DATA_CACHE_VERSION = "v1"
+# Bump when windowing/split logic changes (invalidates cached dataset pkl)
+PREPROCESS_VERSION = "v1"
+
+# Shared PCA (train-only): same projection for QRC, ESN, LSTM, GRU (fair comparison)
+USE_SHARED_PCA     = True
+PCA_COMPONENTS     = None         # None -> QUBIT_PRIMARY
+
+# Reservoir transients — keep consistent across fit / predict / sweeps
+ESN_WARMUP       = 50
+QRC_WARMUP       = 20
 
 # ── Quantum Reservoir ─────────────────────────────────────────────────────────
 # Qubit sweep: challenge requires demonstrating performance across 5–20 qubits
@@ -53,7 +65,7 @@ H_DEFAULT = 0.5
 
 # Topologies to compare
 TOPOLOGIES = ["chain", "all_to_all"]
-TOPOLOGY_PRIMARY = "chain"      # Default; all_to_all run as ablation
+TOPOLOGY_PRIMARY = "chain"      # Overridden by sweep best_topology.json when present
 
 # Time evolution: Trotter steps
 TROTTER_STEPS   = 4
@@ -72,6 +84,9 @@ NOISE_TYPE       = "depolarizing"   # Applied via PennyLane noise model
 
 # Finite-shot ablation (set to None for exact / infinite shots in simulation)
 SHOT_COUNTS      = [None, 500, 1000, 5000]
+
+# Sweeps: cap train samples for Hamiltonian grid (None = use all)
+SWEEP_MAX_TRAIN_SAMPLES = 800
 
 # ── Readout ───────────────────────────────────────────────────────────────────
 # Ridge regression: W* = (XᵀX + λI)⁻¹Xᵀy
@@ -96,17 +111,15 @@ RNN_EPOCHS      = 50
 RNN_LR          = 1e-3
 RNN_BATCH       = 32
 
-# ── MNIST expressivity benchmark ─────────────────────────────────────────────
-MNIST_N_TRAIN   = 1000          # Subset for speed; full 60k not needed here
-MNIST_N_TEST    = 200
-MNIST_N_CLASSES = 10
-
 # ── Evaluation metrics ────────────────────────────────────────────────────────
 # Weather targets → regression metrics only
 # MNIST → accuracy only (classification, separate benchmark)
 METRICS_REGRESSION   = ["rmse", "mae", "vpt"]
-LYAPUNOV_TIME_HOURS  = 84       # ~3.5 days; midlatitude synoptic Lyapunov time
-VPT_THRESHOLD        = 0.4      # Normalised error threshold for VPT
+# VPT: step size = resample grid (6h); Lyapunov time ~2 days for tropical/subseasonal
+RESAMPLE_HOURS       = 6
+LYAPUNOV_TIME_HOURS  = 48
+VPT_THRESHOLD        = 0.4
+REPORT_PHYSICAL_UNITS = True
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 RANDOM_SEED = 42

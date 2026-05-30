@@ -18,7 +18,8 @@ import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import DATA_PROC, STATION_NAME, RESAMPLE_FREQ, MAX_INTERP_GAP, TARGETS
+from config import (DATA_PROC, STATION_NAME, STATION_ID, RESAMPLE_FREQ,
+                    MAX_INTERP_GAP, TARGETS, DATA_CACHE_VERSION)
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -30,6 +31,13 @@ MISSING = {
     "SLP": 99999,
     "WND_SPEED": 9999,
 }
+
+
+def processed_parquet_path(out_dir: Path = None, resample: str = None) -> Path:
+    """Versioned cache path so parser changes do not reuse stale Parquet."""
+    out_dir = out_dir or (DATA_PROC / STATION_NAME)
+    resample = resample or RESAMPLE_FREQ
+    return out_dir / f"weather_{resample}_{STATION_ID}_{DATA_CACHE_VERSION}.parquet"
 
 
 def _parse_tmp(series: pd.Series) -> pd.Series:
@@ -101,7 +109,6 @@ def parse_isd_csv(filepath: Path) -> pd.DataFrame:
         logger.error(f"Failed to read {filepath}: {e}")
         return pd.DataFrame()
 
-    # Timestamp
     if "DATE" not in raw.columns:
         logger.error(f"No DATE column in {filepath.name}")
         return pd.DataFrame()
@@ -110,7 +117,6 @@ def parse_isd_csv(filepath: Path) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(raw["DATE"], utc=True, errors="coerce")
     df = df.dropna(subset=["timestamp"])
 
-    # Parse fields if present
     if "TMP" in raw.columns:
         df["temperature"] = _parse_tmp(raw["TMP"])
     else:
@@ -134,29 +140,62 @@ def parse_isd_csv(filepath: Path) -> pd.DataFrame:
 
     df = df.set_index("timestamp").sort_index()
     n_raw = len(df)
-
-    # Drop complete-row duplicates (sub-hourly obs collapse on resample)
     df = df[~df.index.duplicated(keep="first")]
     logger.debug(f"  {n_raw} rows → {len(df)} after dedup")
 
     return df
 
 
+def _clean_resampled(resampled: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill remaining gaps, then drop any row with a NaN in a target column.
+    Ensures training arrays are never poisoned by partial missing rows.
+    """
+    n_before = len(resampled)
+    resampled = resampled.interpolate(method="time", limit=MAX_INTERP_GAP)
+    resampled = resampled.ffill().bfill()
+    resampled = resampled.dropna(subset=TARGETS, how="any")
+    n_after = len(resampled)
+
+    for col in TARGETS:
+        miss = resampled[col].isna().sum()
+        if miss > 0:
+            raise ValueError(
+                f"Column {col} still has {miss} NaN after cleaning — check parser logic."
+            )
+
+    logger.info(
+        f"Cleaned grid: {n_before} -> {n_after} steps "
+        f"({100 * n_after / max(n_before, 1):.1f}% retained, zero NaN in targets)"
+    )
+    return resampled
+
+
 def load_and_merge(raw_paths: list[Path],
                    out_dir: Path = None,
-                   resample: str = None) -> pd.DataFrame:
+                   resample: str = None,
+                   force_rebuild: bool = False) -> pd.DataFrame:
     """
     Parse all yearly CSVs, concatenate, resample to target frequency,
-    interpolate short gaps, and save to Parquet.
+    interpolate short gaps, fill edges, drop partial-NaN rows, save Parquet.
     """
-    out_dir  = out_dir  or (DATA_PROC / STATION_NAME)
+    out_dir = out_dir or (DATA_PROC / STATION_NAME)
     resample = resample or RESAMPLE_FREQ
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = out_dir / f"weather_{resample}.parquet"
-    if out_path.exists():
+    out_path = processed_parquet_path(out_dir, resample)
+
+    if out_path.exists() and not force_rebuild:
         logger.info(f"Loading cached processed data: {out_path}")
-        return pd.read_parquet(out_path)
+        df = pd.read_parquet(out_path)
+        nan_any = df[TARGETS].isna().any().any()
+        if nan_any:
+            logger.warning(
+                f"Cached Parquet contains NaN targets — rebuilding. "
+                f"Delete manually: {out_path}"
+            )
+        else:
+            return df
 
     frames = []
     for p in sorted(raw_paths):
@@ -170,24 +209,8 @@ def load_and_merge(raw_paths: list[Path],
     full = pd.concat(frames).sort_index()
     full = full[~full.index.duplicated(keep="first")]
 
-    # Resample to regular grid; mean aggregation collapses sub-hourly obs
     resampled = full.resample(resample).mean()
-    n_before = len(resampled)
-
-    # Interpolate short gaps only
-    resampled = resampled.interpolate(method="time", limit=MAX_INTERP_GAP)
-
-    # Drop rows that are still all-NaN for any target
-    resampled = resampled.dropna(subset=TARGETS, how="all")
-    n_after = len(resampled)
-
-    pct_retained = 100 * n_after / n_before
-    logger.info(f"Resampled {n_before} → {n_after} steps ({pct_retained:.1f}% retained)")
-
-    # Log missing rates per variable
-    for col in TARGETS:
-        miss = resampled[col].isna().mean() * 100
-        logger.info(f"  {col}: {miss:.1f}% missing after interpolation")
+    resampled = _clean_resampled(resampled)
 
     resampled.to_parquet(out_path)
     logger.info(f"Saved processed data → {out_path}")
@@ -197,6 +220,6 @@ def load_and_merge(raw_paths: list[Path],
 if __name__ == "__main__":
     from data.downloader import download_all
     paths = download_all()
-    df = load_and_merge(paths)
+    df = load_and_merge(paths, force_rebuild=True)
     print(df.describe())
     print(df.head())

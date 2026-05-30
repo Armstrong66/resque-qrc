@@ -90,7 +90,7 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available())"
 python main.py
 ```
 
-### Smoke test (fast validation, ~5 minutes)
+### Smoke test (fast validation; auto-skips sweeps)
 ```bash
 python main.py --smoke_test
 ```
@@ -98,6 +98,16 @@ python main.py --smoke_test
 ### Skip download if data already cached
 ```bash
 python main.py --skip_download
+```
+
+### Rebuild processed data (after parser / station change)
+```bash
+python main.py --force_rebuild_data --skip_download
+```
+
+### Data quality audit (run before training)
+```bash
+python eda/inspect_data.py
 ```
 
 ### Single horizon only
@@ -150,6 +160,7 @@ python main.py --platform qbraid
 | `WINDOW_SIZE` | 20 | Input window (steps) |
 | `HORIZONS` | [6, 24] | Forecast horizons (hours) |
 | `USE_WARM_START` | True | ESN → QRC readout init |
+| `USE_SHARED_PCA` | True | Fair PCA input for all models |
 | `MULTIOUTPUT_MODES` | all three | Joint/independent/ensemble |
 
 ---
@@ -169,6 +180,18 @@ All results saved to `outputs/results/`:
 | `results_h6.csv` | Full benchmark table (6h horizon) |
 | `results_h24.csv` | Full benchmark table (24h horizon) |
 | `warm_start_qrc_config.json` | Reproducibility config |
+
+---
+
+## Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+## Figures
+
+After a full run, sweep and results plots are saved to `outputs/figures/` (disable with `--no_figures`).
 
 ---
 

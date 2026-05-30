@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import RIDGE_LAMBDAS, RESULTS, RANDOM_SEED
+from config import RIDGE_LAMBDAS, MULTIOUTPUT_MODES, RESULTS, RANDOM_SEED
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -88,32 +88,21 @@ def esn_warm_start_weights(X_train_esn: np.ndarray,
                             lambda_: float,
                             qrc_feature_dim: int) -> np.ndarray:
     """
-    Train a ridge readout on classical ESN states, then resize/project
-    the weights to match QRC feature dimension.
-    Used to initialise QRC readout before the analytical solve (warm-start).
-
-    If ESN dim == QRC dim: use directly.
-    If ESN dim != QRC dim: project via random orthogonal matrix (fixed seed).
+    Ridge readout on ESN states, then SVD-based rank transfer to QRC feature dim.
     """
-    W_esn = _ridge_solve(X_train_esn, y_train, lambda_)  # (esn_dim, n_targets)
-    esn_dim = W_esn.shape[0]
+    W_esn = _ridge_solve(X_train_esn, y_train, lambda_)
+    esn_dim, n_targets = W_esn.shape
 
     if esn_dim == qrc_feature_dim:
         logger.debug("Warm-start: ESN and QRC dims match — direct transfer")
         return W_esn
 
-    # Project ESN weights to QRC dimension
-    rng = np.random.default_rng(RANDOM_SEED)
-    if esn_dim < qrc_feature_dim:
-        P = rng.standard_normal((esn_dim, qrc_feature_dim))
-        P /= np.linalg.norm(P, axis=1, keepdims=True)
-        W_init = P.T @ W_esn     # (qrc_dim, n_targets)
-    else:
-        P = rng.standard_normal((qrc_feature_dim, esn_dim))
-        P /= np.linalg.norm(P, axis=0, keepdims=True)
-        W_init = P @ W_esn       # (qrc_dim, n_targets)
-
-    logger.debug(f"Warm-start: projected ESN ({esn_dim}d) → QRC ({qrc_feature_dim}d)")
+    # Truncated / padded SVD transfer (deterministic, no random projection)
+    U, s, Vt = np.linalg.svd(W_esn, full_matrices=False)
+    W_init = np.zeros((qrc_feature_dim, n_targets), dtype=np.float32)
+    k = min(qrc_feature_dim, esn_dim, len(s))
+    W_init[:k, :] = (U[:k, :] * s[:k, np.newaxis]) @ Vt[:k, :]
+    logger.debug(f"Warm-start: SVD transfer ESN ({esn_dim}d) -> QRC ({qrc_feature_dim}d)")
     return W_init.astype(np.float32)
 
 
@@ -138,7 +127,9 @@ class RidgeReadout:
                  warm_start: bool = True):
         self.target_names = target_names
         self.lambdas      = lambdas or RIDGE_LAMBDAS
-        self.modes        = modes or ["joint", "independent", "ensemble"]
+        self.modes        = modes or list(MULTIOUTPUT_MODES)
+        # Ensemble is built post-loop from best joint + independent
+        self._fit_modes   = [m for m in self.modes if m != "ensemble"]
         self.warm_start   = warm_start
         self.best_result_: Optional[ReadoutResult] = None
         self._all_results_: list[ReadoutResult] = []
@@ -155,17 +146,16 @@ class RidgeReadout:
         n_targets = y_train.shape[1]
         results = []
 
-        for mode in self.modes:
+        for mode in self._fit_modes:
             for lam in self.lambdas:
 
-                # ── Joint mode ─────────────────────────────────────────────
-                if mode in ("joint", "ensemble"):
+                if mode == "joint":
                     W = self._fit_joint(X_train, y_train, lam,
                                         X_train_esn, warm=self.warm_start)
                     val_pred = X_val @ W
                     val_rmse = _rmse_per_target(y_val, val_pred)
                     results.append(ReadoutResult(
-                        strategy     = mode,
+                        strategy     = "joint",
                         warm_start   = self.warm_start,
                         lambda_      = lam,
                         W            = W,
@@ -174,7 +164,6 @@ class RidgeReadout:
                         target_names = self.target_names,
                     ))
 
-                # ── Independent mode ───────────────────────────────────────
                 if mode == "independent":
                     W_all = []
                     for t in range(n_targets):
@@ -201,7 +190,7 @@ class RidgeReadout:
         # (Separate from the modes loop above — done after all individual fits)
         ind_results  = [r for r in results if r.strategy == "independent"]
         joint_results = [r for r in results if r.strategy == "joint"]
-        if ind_results and joint_results:
+        if "ensemble" in self.modes and ind_results and joint_results:
             best_ind   = min(ind_results,   key=lambda r: r.val_rmse_mean)
             best_joint = min(joint_results, key=lambda r: r.val_rmse_mean)
             ens_pred   = 0.5 * (X_val @ best_ind.W + X_val @ best_joint.W)
@@ -246,7 +235,7 @@ class RidgeReadout:
         logger.info(f"{'Strategy':<14} {'WarmStart':<10} {'Lambda':<10} {'Val RMSE (mean)'}")
         logger.info("-" * 60)
         for r in sorted(all_results, key=lambda x: x.val_rmse_mean):
-            marker = " ← SELECTED" if r is best else ""
+            marker = " [SELECTED]" if r is best else ""
             logger.info(
                 f"{r.strategy:<14} {str(r.warm_start):<10} {r.lambda_:<10.5g} "
                 f"{r.val_rmse_mean:.4f}{marker}"
@@ -278,4 +267,4 @@ class RidgeReadout:
         path = out_dir / "readout_selection.json"
         with open(path, "w") as f:
             json.dump(summary, f, indent=2)
-        logger.info(f"Selection log saved → {path}")
+        logger.info(f"Selection log saved -> {path}")
