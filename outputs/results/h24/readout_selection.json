@@ -1,0 +1,182 @@
+[
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 10.0,
+    "val_rmse_mean": 1.2308276891708374,
+    "val_rmse_per_target": {
+      "temperature": 0.8403825759887695,
+      "humidity": 0.9372314810752869,
+      "pressure": 2.197939157485962,
+      "wind_speed": 0.9477576017379761
+    }
+  },
+  {
+    "strategy": "ensemble",
+    "warm_start": true,
+    "lambda": -1.0,
+    "val_rmse_mean": 1.230857253074646,
+    "val_rmse_per_target": {
+      "temperature": 0.8403956890106201,
+      "humidity": 0.9372439384460449,
+      "pressure": 2.1979000568389893,
+      "wind_speed": 0.9478893876075745
+    }
+  },
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 1.0,
+    "val_rmse_mean": 1.2308903932571411,
+    "val_rmse_per_target": {
+      "temperature": 0.8404316306114197,
+      "humidity": 0.9372587203979492,
+      "pressure": 2.1978652477264404,
+      "wind_speed": 0.9480060338973999
+    }
+  },
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 0.1,
+    "val_rmse_mean": 1.230901837348938,
+    "val_rmse_per_target": {
+      "temperature": 0.8404416441917419,
+      "humidity": 0.9372633695602417,
+      "pressure": 2.197866201400757,
+      "wind_speed": 0.9480360746383667
+    }
+  },
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 0.0001,
+    "val_rmse_mean": 1.2309027910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404424786567688,
+      "humidity": 0.937264621257782,
+      "pressure": 2.1978654861450195,
+      "wind_speed": 0.9480385780334473
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 1e-05,
+    "val_rmse_mean": 1.2309027910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404425978660583,
+      "humidity": 0.9372647404670715,
+      "pressure": 2.1978652477264404,
+      "wind_speed": 0.948038637638092
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 0.0001,
+    "val_rmse_mean": 1.2309027910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404426574707031,
+      "humidity": 0.9372646808624268,
+      "pressure": 2.1978652477264404,
+      "wind_speed": 0.948038637638092
+    }
+  },
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 1e-05,
+    "val_rmse_mean": 1.230902910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404425978660583,
+      "humidity": 0.9372646808624268,
+      "pressure": 2.1978654861450195,
+      "wind_speed": 0.9480385780334473
+    }
+  },
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 0.001,
+    "val_rmse_mean": 1.230902910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404425978660583,
+      "humidity": 0.9372646808624268,
+      "pressure": 2.1978654861450195,
+      "wind_speed": 0.9480385780334473
+    }
+  },
+  {
+    "strategy": "joint",
+    "warm_start": true,
+    "lambda": 0.01,
+    "val_rmse_mean": 1.230902910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404427170753479,
+      "humidity": 0.9372644424438477,
+      "pressure": 2.197866201400757,
+      "wind_speed": 0.9480385184288025
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 0.001,
+    "val_rmse_mean": 1.230902910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404425978660583,
+      "humidity": 0.9372648000717163,
+      "pressure": 2.1978654861450195,
+      "wind_speed": 0.948038637638092
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 0.01,
+    "val_rmse_mean": 1.230902910232544,
+    "val_rmse_per_target": {
+      "temperature": 0.8404424786567688,
+      "humidity": 0.9372645020484924,
+      "pressure": 2.1978659629821777,
+      "wind_speed": 0.948038637638092
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 0.1,
+    "val_rmse_mean": 1.2309030294418335,
+    "val_rmse_per_target": {
+      "temperature": 0.8404411673545837,
+      "humidity": 0.937265157699585,
+      "pressure": 2.197868824005127,
+      "wind_speed": 0.9480367302894592
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 1.0,
+    "val_rmse_mean": 1.2309032678604126,
+    "val_rmse_per_target": {
+      "temperature": 0.8404264450073242,
+      "humidity": 0.937273383140564,
+      "pressure": 2.1978983879089355,
+      "wind_speed": 0.9480145573616028
+    }
+  },
+  {
+    "strategy": "independent",
+    "warm_start": true,
+    "lambda": 10.0,
+    "val_rmse_mean": 1.230934977531433,
+    "val_rmse_per_target": {
+      "temperature": 0.840317964553833,
+      "humidity": 0.9373557567596436,
+      "pressure": 2.1982383728027344,
+      "wind_speed": 0.9478277564048767
+    }
+  }
+]

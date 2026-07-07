@@ -1,0 +1,16 @@
+{
+  "n_qubits": 9,
+  "J": 0.3,
+  "h": 0.8,
+  "topology": "chain",
+  "trotter_steps": 4,
+  "evolution_time": 1.0,
+  "noise_rate": 0.0,
+  "shots": null,
+  "use_feedback": true,
+  "feature_dim": 18,
+  "horizon_hours": 24,
+  "readout_strategy": "joint",
+  "warm_start": true,
+  "shared_pca": true
+}
