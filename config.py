@@ -57,6 +57,8 @@ QRC_WARMUP       = 20
 QUBIT_COUNTS    = [5, 7, 9, 12, 16, 20]
 QUBIT_PRIMARY   = 9             # Primary reported result (matches Hou et al. 2026)
 
+USE_DATA_REUPLOADING = True
+
 # Hamiltonian: transverse-field Ising  H = -J ΣZᵢZⱼ - h ΣXᵢ
 J_SWEEP  = [0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
 H_SWEEP  = [0.1, 0.3, 0.5, 0.8, 1.0]
