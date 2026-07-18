@@ -83,10 +83,10 @@ Every experiment must write a JSON summary alongside any CSV. Agents parse JSON,
 
 ### 2.4 The agent must be able to self-verify reproducibility
 
-Add a `verify_results.py` script that reads all output JSONs and confirms:
+**Status: built** (`verify_results.py`). Reads all output JSONs/CSVs and confirms:
 - All expected files exist
-- Key metrics match within tolerance of a stored reference run
 - No NaN values in any result
+- Key metrics match within tolerance of a stored reference run — this check reports "not available" rather than silently passing until someone runs `python verify_results.py --save_reference` once after a trusted full run; there is no reference snapshotted in this repo yet.
 
 This is what judges run after re-executing your code to confirm their results match yours.
 
@@ -94,7 +94,9 @@ This is what judges run after re-executing your code to confirm their results ma
 
 ## 3. `agent_runner.py` — the agentic interface
 
-This file is the single point of entry for any automated executor. It reads a task name and optional JSON config, runs the appropriate pipeline module, and writes a structured result. The team's coder should build this.
+**Status: built** (see `docs/PROJECT_CRITIQUE.md` "Pass 4"). This file is the single point of entry for any automated executor. It reads a task name and optional JSON config, runs the appropriate pipeline module, and writes a structured result. It adds no new model/data logic — every task calls the same functions `main.py` calls (`hamiltonian_sweep`, `run_esn`, `IsingQRC`, etc.), per the "one pipeline, multiple interfaces" principle in §8.
+
+One deliberate scope note versus the original sketch below: `train_baselines` and `train_qrc` are separate tasks (as specified), and `benchmark_all` reconstructs the full table from whatever per-model `.pkl` files exist on disk under `outputs/results/h{N}/` — which required `train_qrc` to also persist its QRC prediction arrays to disk (it previously only kept them in memory within a single `main.py` process), now fixed in both `main.py` and `agent_runner.py` so the two interfaces stay consistent.
 
 **Interface contract:**
 
@@ -151,17 +153,27 @@ Each task writes its output before the next begins. If any task produces `"statu
 
 ### 4.2 Hardware integration hook
 
-The `train_qrc` task should check an environment variable to select backend:
+**Status: built for all three backends** (see `reservoir/quantum_reservoir.py::_get_device` / `_get_ibm_device`, `reservoir/aquila_backend.py`, and `docs/PROJECT_CRITIQUE.md` §1.2, Pass 5). `IsingQRC(hardware_backend=...)` resolves from the constructor arg, then `$QRC_BACKEND`, then `"simulation"`:
 
 ```python
 import os
 BACKEND = os.environ.get('QRC_BACKEND', 'simulation')
-# 'simulation'  → PennyLane default.qubit / lightning.qubit
-# 'aquila'      → QuEra via Bloqade (requires qBraid Bloqade kernel)
-# 'ibm'         → IBM Eagle via Qiskit Runtime (requires IBM token)
+# 'simulation'  → PennyLane default.qubit / lightning.qubit  (IMPLEMENTED, default)
+# 'aquila'      → QuEra Aquila — PRIMARY hardware backend (bloqade-analog).
+#                  IMPLEMENTED, but NOT a device swap: Aquila is analog (no
+#                  gate set), so IsingQRC delegates entirely to
+#                  reservoir/aquila_backend.py::AquilaBackend, which
+#                  re-expresses J/h as a real physical Rydberg program.
+#                  Validated end-to-end against two FREE local emulators
+#                  (config.AQUILA_SUBMIT_TARGET); not yet run against live
+#                  hardware. Read aquila_backend.py's module docstring
+#                  before trusting numbers from this path.
+# 'ibm'         → IBM Eagle via Qiskit Runtime + pennylane-qiskit — FALLBACK.
+#                  IMPLEMENTED as a genuine device swap (existing circuit
+#                  unchanged), not yet run against live hardware.
 ```
 
-On qBraid, the organiser sets `QRC_BACKEND=aquila` or `QRC_BACKEND=ibm` before running — your code picks it up without any file edits. This is the clean hardware integration point.
+Deliberately NOT wired into the sweep tasks (`hamiltonian_sweep`, `noise_sweep`, `qubit_scaling`, `shot_ablation` all stay simulator-only) — those are dozens of configs × hundreds of timesteps each, which is thousands of individually-queued real jobs if pointed at hardware. `QRC_BACKEND` is consumed by `scripts/hardware_validation.py` / `agent_runner.py --task hardware_validation` instead, which validates only the final selected config over a small subsampled window.
 
 ### 4.3 Testing the agentic layer yourself
 
@@ -300,10 +312,10 @@ Honest assessment: running the QRC reservoir live on real hardware for every inf
 
 | Role | Immediate Phase 3 task |
 |---|---|
-| **Coder** | Build `agent_runner.py` (§3); wire `QRC_BACKEND` env var into `quantum_reservoir.py`; build `scripts/export_model.py` |
-| **Data/Technical Lead** | Run full pipeline end-to-end; fill benchmark tables; run encoding ablation; own `verify_results.py` |
+| **Coder** | ~~Build `agent_runner.py` (§3); wire `QRC_BACKEND` env var into `quantum_reservoir.py`~~ DONE. Remaining: build `scripts/export_model.py` |
+| **Data/Technical Lead** | Run full pipeline end-to-end; fill benchmark tables; run encoding ablation; own `verify_results.py`; run `scripts/hardware_validation.py --backend aquila` (small `n_steps`) as the first real hardware check |
 | **Content/Knowledge Expert** | Write Phase 3 5-page paper; own the quantum advantage narrative and limitations section |
-| **Business/Production** | Build Vercel serverless endpoint (`api/infer.py`); connect to frontend chart; coordinate QPU access request |
+| **Business/Production** | Build Vercel serverless endpoint (`api/infer.py`); connect to frontend chart; coordinate QPU access request (Aquila via Braket, IBM as fallback — both already implemented and awaiting a live-hardware run) |
 | **Project Manager** | End-to-end agentic test (§4.3); package `ResQue_Challenge_Phase3.zip`; README completeness check; deadline tracking |
 
 ---

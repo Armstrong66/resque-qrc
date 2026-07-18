@@ -137,7 +137,7 @@ print(df)
 ```bash
 python -c "
 from preprocessing.pipeline import WeatherPreprocessor
-from baselines.classical import run_persistence, run_esn, run_rnn
+from baselines.classical import run_persistence, run_arima, run_esn, run_rnn, ARIMA_AVAILABLE
 from config import WINDOW_SIZE, TARGETS
 
 ds = WeatherPreprocessor.load(6)
@@ -146,15 +146,20 @@ ds = WeatherPreprocessor.load(6)
 r = run_persistence(ds.y_val, ds.y_test, ds.X_val, ds.X_test, WINDOW_SIZE)
 print('Persistence test RMSE:', r.test_rmse)
 
-# ESN (also generates warm-start weights)
+# ARIMA — prefers pmdarima, falls back to a statsmodels grid search if
+# pmdarima is not installed (ARIMA_AVAILABLE=False only if NEITHER is present)
+r = run_arima(ds.y_train, ds.y_val, ds.y_test, TARGETS)
+print('ARIMA test RMSE:', r.test_rmse if r else f'unavailable (ARIMA_AVAILABLE={ARIMA_AVAILABLE})')
+
+# ESN (also the default warm-start source for the QRC readout)
 r_esn, fitted_esn = run_esn(ds.X_train, ds.y_train,
                               ds.X_val, ds.y_val,
                               ds.X_test, ds.y_test)
 print('ESN test RMSE:', r_esn.test_rmse)
 
-# LSTM (change model_type='gru' to run GRU)
-r_lstm = run_rnn(ds.X_train, ds.y_train, ds.X_val, ds.y_val,
-                  ds.X_test, ds.y_test, window=WINDOW_SIZE, model_type='lstm')
+# LSTM (change model_type='gru' to run GRU) — returns (result, warm_start_extractor)
+r_lstm, lstm_extractor = run_rnn(ds.X_train, ds.y_train, ds.X_val, ds.y_val,
+                                  ds.X_test, ds.y_test, window=WINDOW_SIZE, model_type='lstm')
 print('LSTM test RMSE:', r_lstm.test_rmse if r_lstm else 'unavailable')
 "
 ```
@@ -168,22 +173,28 @@ import json
 from preprocessing.pipeline import WeatherPreprocessor
 from reservoir.quantum_reservoir import IsingQRC
 from readout.ridge_readout import RidgeReadout
-from baselines.classical import run_esn
-from config import TARGETS
+from baselines.classical import run_esn, run_rnn
+from config import TARGETS, WARM_START_SOURCE, USE_DATA_REUPLOADING
 
 ds = WeatherPreprocessor.load(6)
 jh = json.load(open('outputs/results/best_hamiltonian.json'))
 jn = json.load(open('outputs/results/best_noise.json'))
 
-# Get ESN warm-start states
-_, fitted_esn = run_esn(ds.X_train, ds.y_train,
-                         ds.X_val, ds.y_val,
-                         ds.X_test, ds.y_test)
-X_train_esn = fitted_esn.get_reservoir_states(ds.X_train)
+# Warm-start source is a ONE-LINE config switch — config.WARM_START_SOURCE
+# is 'esn' | 'lstm' | 'gru' (NOT 'arima': ARIMA has no reservoir-like hidden
+# state, so it structurally cannot warm-start a ridge readout).
+if WARM_START_SOURCE == 'esn':
+    _, fitted = run_esn(ds.X_train, ds.y_train, ds.X_val, ds.y_val, ds.X_test, ds.y_test)
+    X_train_warm = fitted.get_reservoir_states(ds.X_train)
+else:
+    _, fitted = run_rnn(ds.X_train, ds.y_train, ds.X_val, ds.y_val, ds.X_test, ds.y_test,
+                        model_type=WARM_START_SOURCE)
+    X_train_warm = fitted.get_hidden_states(ds.X_train)
 
-# Run quantum reservoir
+# Run quantum reservoir (best_hamiltonian.json records which encoding it was
+# swept under — re-run Step 3 if USE_DATA_REUPLOADING has changed since)
 qrc = IsingQRC(n_qubits=9, J=jh['J_star'], h=jh['h_star'],
-               noise_rate=jn['p_star'])
+               noise_rate=jn['p_star'], use_data_reuploading=USE_DATA_REUPLOADING)
 H_train = qrc.run_sequence(ds.X_train)
 H_val   = qrc.run_sequence(ds.X_val)
 
@@ -191,7 +202,7 @@ H_val   = qrc.run_sequence(ds.X_val)
 readout = RidgeReadout(target_names=TARGETS, warm_start=True)
 best = readout.fit(H_train, ds.y_train[:len(H_train)],
                    H_val,   ds.y_val[:len(H_val)],
-                   X_train_esn=X_train_esn[:len(H_train)])
+                   X_train_warm_start=X_train_warm[:len(H_train)])
 readout.save_selection_log()
 print('Selected strategy:', best.strategy, 'val_rmse:', best.val_rmse_mean)
 "
@@ -231,12 +242,30 @@ p_star, df = noise_sweep(..., noise_rates=[0, 0.001, 0.005, 0.01, 0.02, 0.05])
 
 ### Switch LSTM → GRU
 ```python
-r = run_rnn(..., model_type='gru')   # One-line change
+r, extractor = run_rnn(..., model_type='gru')   # One-line change
 ```
 
 ### Switch topology
 ```python
 qrc = IsingQRC(n_qubits=9, topology='all_to_all')  # vs 'chain'
+```
+
+### Switch the QRC warm-start source (ESN / LSTM / GRU)
+```python
+# config.py: WARM_START_SOURCE = "esn"   # or "lstm" / "gru" — one-line change.
+# main.py's _resolve_warm_start_states() and the notebook's Step 6/7 cells
+# read this value directly; no other code needs to change.
+# NOT valid: "arima" — ARIMA has no reservoir-like hidden state to transfer,
+# and raises a clear ValueError if selected.
+```
+
+### Toggle data-reuploading encoding
+```python
+# config.py: USE_DATA_REUPLOADING = True   # or False for standard single-injection
+# Re-run Step 3 (hamiltonian_sweep) afterwards — J*/h* are encoding-dependent
+# and best_hamiltonian.json records which encoding produced them; main.py
+# warns loudly if a cached sweep result predates the current setting.
+qrc = IsingQRC(n_qubits=9, use_data_reuploading=True)   # or pass explicitly
 ```
 
 ### Change forecast horizon
@@ -255,7 +284,8 @@ ds = WeatherPreprocessor.load(24)   # Load 24h horizon dataset
 | `outputs/processed/AddisAbaba_Bole/dataset_h6.pkl` | Windowed dataset (6h) | Pickle |
 | `outputs/processed/AddisAbaba_Bole/dataset_h24.pkl` | Windowed dataset (24h) | Pickle |
 | `outputs/results/hamiltonian_sweep.csv` | (J, h) sweep RMSE grid | CSV |
-| `outputs/results/best_hamiltonian.json` | Selected J*, h* | JSON |
+| `outputs/results/best_hamiltonian.json` | Selected J*, h* (+ which encoding produced them) | JSON |
+| `outputs/results/h{N}/baseline_status.json` | ok/skipped/failed + reason per baseline | JSON |
 | `outputs/results/noise_sweep.csv` | Noise rate vs RMSE | CSV |
 | `outputs/results/best_noise.json` | Selected p* | JSON |
 | `outputs/results/qubit_scaling.csv` | RMSE vs qubit count | CSV |
@@ -280,17 +310,25 @@ ds = WeatherPreprocessor.load(24)   # Load 24h horizon dataset
 | Preprocess | `preprocessing/pipeline.py` | `WeatherPreprocessor` |
 | Run reservoir | `reservoir/quantum_reservoir.py` | `IsingQRC.run_sequence()` |
 | Qubit sweep | `reservoir/quantum_reservoir.py` | `run_qubit_sweep()` |
+| Encoding ablation | `reservoir/quantum_reservoir.py` | `encoding_ablation()` |
 | Fit readout | `readout/ridge_readout.py` | `RidgeReadout.fit()` |
-| Warm-start init | `readout/ridge_readout.py` | `esn_warm_start_weights()` |
+| Warm-start init (any source) | `readout/ridge_readout.py` | `classical_warm_start_weights()` |
+| Switch warm-start source | `config.py` | `WARM_START_SOURCE = "esn"\|"lstm"\|"gru"` |
 | ESN baseline | `baselines/classical.py` | `run_esn()` |
 | LSTM/GRU baseline | `baselines/classical.py` | `run_rnn(model_type=...)` |
-| ARIMA baseline | `baselines/classical.py` | `run_arima()` |
+| ARIMA baseline | `baselines/classical.py` | `run_arima()` (pmdarima, else statsmodels fallback) |
 | Hamiltonian sweep | `experiments/sweeps.py` | `hamiltonian_sweep()` |
 | Noise sweep | `experiments/sweeps.py` | `noise_sweep()` |
 | Qubit scaling | `experiments/sweeps.py` | `qubit_scaling_study()` |
 | Shot ablation | `experiments/sweeps.py` | `shot_ablation()` |
 | Compute metrics | `evaluation/metrics.py` | `build_results_table()` |
 | Full pipeline | `main.py` | `run_pipeline(args)` |
+| Agentic task interface | `agent_runner.py` | `run_task(task, cfg)` |
+| Reproducibility check | `verify_results.py` | `verify_all()` |
+| Real-hardware validation | `scripts/hardware_validation.py` | `run_hardware_validation()` |
+| Switch hardware backend | `reservoir/quantum_reservoir.py` | `IsingQRC(hardware_backend=...)` or `$QRC_BACKEND` |
+| Aquila physical mapping (PRIMARY) | `reservoir/aquila_backend.py` | `AquilaBackend`, `_compute_geometry()` |
+| Switch Aquila real hw vs. free emulator | `config.py` | `AQUILA_SUBMIT_TARGET` or `$AQUILA_SUBMIT_TARGET` |
 
 ---
 
@@ -303,10 +341,16 @@ ds = WeatherPreprocessor.load(24)   # Load 24h horizon dataset
 pip install pennylane pennylane-lightning
 ```
 
-**ARIMA import error:**
+**ARIMA missing from results_h*.csv:**
+Check `outputs/results/h{N}/baseline_status.json` — it records exactly why
+each baseline was skipped. ARIMA has two independent backends
+(`baselines/classical.py`): pmdarima (preferred) and a statsmodels grid-search
+fallback. It only truly disappears if NEITHER is importable:
 ```bash
-pip install pmdarima statsmodels
+pip install statsmodels pmdarima
 ```
+The pipeline logs an ERROR (not a buried warning) at startup and per-horizon
+whenever ARIMA is unavailable, specifically so this cannot go unnoticed.
 
 **PyTorch CUDA not available (RTX workstation):**
 ```bash
@@ -354,19 +398,98 @@ Cold-Start QRC, Warm-Start QRC.
 
 ## HARDWARE NOTES (Phase 3)
 
-**QuEra Aquila (Rydberg analog):**
-The IsingQRC reservoir maps directly to Aquila's Rydberg blockade Hamiltonian.
-Install Bloqade on qBraid Lab (pre-installed in Bloqade environment):
-```bash
-# On qBraid Lab — switch kernel to "Bloqade" environment
-# Then follow: github.com/QuEraComputing/QRC-tutorials
-```
-The `IsingQRC` class is designed for easy extension to Bloqade submission.
+All sweeps (`hamiltonian_sweep`, `noise_sweep`, `qubit_scaling_study`,
+`shot_ablation`, `topology_comparison`) run on simulator ONLY, by design —
+each sweeps dozens of configs over hundreds of timesteps, and every timestep
+is one circuit execution; pointed at real hardware that is thousands of
+individually-queued jobs. Real hardware is for validating the FINAL,
+already-selected config over a small subsampled window — see
+`scripts/hardware_validation.py` and `docs/PROJECT_CRITIQUE.md` §3.2.
 
-**IBM Eagle/Heron (fallback):**
+**Backend selection:** `IsingQRC(hardware_backend=...)`, or set `$QRC_BACKEND`
+(`simulation` | `aquila` | `ibm`, default `simulation`).
+
+**QuEra Aquila — PRIMARY, implemented:**
 ```bash
-pip install qiskit qiskit-ibm-runtime
-# Use qBraid SDK for provider-agnostic submission
+pip install bloqade-analog   # pulls in amazon-braket-sdk (Aquila is accessed via AWS Braket)
+python scripts/hardware_validation.py --horizon 6 --n_steps 10 --backend aquila
+```
+Aquila is an *analog* Rydberg device with no gate set, so this is **NOT** a
+device swap the way IBM is — `reservoir/aquila_backend.py::AquilaBackend`
+re-expresses J/h as a real physical program: atom spacing sets the
+interaction strength (Rydberg blockade), a global Rabi drive sets the
+transverse field, and per-atom local detuning encodes the classical input
+(the ONLY per-atom-addressable channel real hardware exposes — and it's
+constrained non-negative, so encoding angles are affine-remapped from
+`[-π,π]` into `[0,1]` coefficients). Measurement is Z-basis only; the
+X-feature half comes from a basis-rotation pulse appended before
+measurement, which is why this backend submits TWO programs per timestep.
+**Read `reservoir/aquila_backend.py`'s module docstring in full before
+trusting numbers from this backend** — it states every design choice and
+its physical justification explicitly.
+
+Validated end-to-end against TWO free local emulators (no credentials
+needed) — `config.AQUILA_SUBMIT_TARGET` / `$AQUILA_SUBMIT_TARGET` controls
+which:
+- `"local_emulator"` (default) — Bloqade's own Python emulator.
+- `"braket_local_emulator"` — AWS Braket's stricter local AHS simulator,
+  closer to what real hardware submission validates against; this is what
+  caught a real waveform-duration bug during development (see
+  `docs/PROJECT_CRITIQUE.md`).
+- `"aquila"` — **real hardware.** Submits actual circuits and consumes real
+  qBraid/QuEra credits. **Not yet run against live Aquila hardware** in
+  development. Start with `--n_steps 5-10`, not 50, the first time.
+
+Geometry has hard limits from Aquila's published capabilities (256 atoms,
+75×76 μm lattice, 4 μm minimum spacing) — `AquilaBackend` clamps atom
+spacing to fit and raises a clear `ValueError` (not a silently-wrong
+program) if a requested `n_qubits` doesn't fit even at minimum spacing.
+Note: at this project's default calibration constants, `n_qubits=20` only
+fits as `topology="all_to_all"` (a compact-ring approximation — true
+uniform all-to-all coupling isn't physically realizable with 1/r^6
+interactions), not `"chain"`.
+
+**IBM Eagle/Heron — FALLBACK, implemented:**
+```bash
+pip install qiskit-ibm-runtime pennylane-qiskit
+# Save an IBM Quantum account token once:
+python -c "from qiskit_ibm_runtime import QiskitRuntimeService; \
+           QiskitRuntimeService.save_account(channel='ibm_quantum', token='YOUR_TOKEN')"
+python scripts/hardware_validation.py --horizon 6 --n_steps 30 --backend ibm
+```
+This IS a genuine drop-in device swap — the existing RY/IsingZZ/RX gate
+circuit runs unchanged (see `reservoir/quantum_reservoir.py::_get_ibm_device`).
+**Not yet executed against live IBM hardware** in development — confirm
+end-to-end (or at minimum against a Qiskit simulator backend) before
+treating its output as trustworthy for a submission.
+
+---
+
+## AGENTIC TASK INTERFACE
+
+`agent_runner.py` is the machine-parseable entry point described in
+`docs/AGENTIC_DESIGN_GUIDE.md`: one task per pipeline step, JSON config
+overrides, `AGENT_RESULT: {...}` on the last line of stdout, and a mirrored
+copy written to `outputs/results/agent_tasks/{task}.json`.
+
+```bash
+python agent_runner.py --task setup
+python agent_runner.py --task hamiltonian_sweep --config '{"n_qubits": 9}'
+python agent_runner.py --task train_baselines
+python agent_runner.py --task train_qrc
+python agent_runner.py --task benchmark_all
+python agent_runner.py --task hardware_validation --config '{"horizon": 6, "n_steps": 50}'
+python agent_runner.py --task full_run          # all of the above, in order
+```
+
+`verify_results.py` is the reproducibility check judges run after
+re-executing the pipeline: confirms expected files exist, results tables
+contain no NaN, and (once `--save_reference` has been run once after a
+trusted full run) that key metrics match a stored reference within
+tolerance.
+```bash
+python verify_results.py --save_reference   # do this ONCE after a trusted run
+python verify_results.py                    # do this on every subsequent run
 ```
 
 ---

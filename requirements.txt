@@ -18,8 +18,12 @@ torch>=2.2.0                     # CPU+GPU; CUDA wheels installed automatically
                                  #             torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
 
 # ── Classical time-series baselines ──────────────────────────────────────────
+# statsmodels is the REQUIRED ARIMA backend (small internal grid-search
+# fallback in baselines/classical.py). pmdarima is preferred when available
+# (faster stepwise auto_arima) but is optional — ARIMA no longer silently
+# vanishes from results if only pmdarima fails to install on a given host.
 statsmodels>=0.14.0
-pmdarima>=2.0.4                  # Auto-ARIMA
+pmdarima>=2.0.4                  # Optional but preferred: faster Auto-ARIMA
 
 # ── Data access & storage ─────────────────────────────────────────────────────
 requests>=2.31.0
@@ -39,4 +43,16 @@ pytest>=7.4.0
 # ── Optional: qBraid platform (install when running on qBraid Lab) ────────────
 # qbraid>=0.8.0
 # qbraid-sdk>=0.8.0
-# bloqade>=0.15.0                # QuEra Aquila — install separately on qBraid Lab
+
+# ── Optional: real-hardware validation (see scripts/hardware_validation.py) ───
+# PRIMARY — QuEra Aquila, QRC_BACKEND=aquila. bloqade-analog is QuEra's own
+# Python SDK; pulls in amazon-braket-sdk since Aquila is accessed via AWS
+# Braket. Install this FIRST — it's what config.AQUILA_SUBMIT_TARGET's
+# default ("local_emulator") needs even for the free, no-credentials local
+# validation path in reservoir/aquila_backend.py.
+# bloqade-analog>=0.16.3
+
+# FALLBACK — IBM Eagle/Heron, QRC_BACKEND=ibm.
+# qiskit-ibm-runtime>=0.23.0
+# pennylane-qiskit>=0.38.0        # provides the qml.device("qiskit.remote", ...) used
+                                 # by reservoir/quantum_reservoir.py::_get_ibm_device

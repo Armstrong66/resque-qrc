@@ -83,27 +83,34 @@ def _rmse_per_target(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
 
 # ── Warm-start helper ─────────────────────────────────────────────────────────
 
-def esn_warm_start_weights(X_train_esn: np.ndarray,
-                            y_train: np.ndarray,
-                            lambda_: float,
-                            qrc_feature_dim: int) -> np.ndarray:
+def classical_warm_start_weights(X_train_classical: np.ndarray,
+                                  y_train: np.ndarray,
+                                  lambda_: float,
+                                  qrc_feature_dim: int) -> np.ndarray:
     """
-    Ridge readout on ESN states, then SVD-based rank transfer to QRC feature dim.
+    Ridge readout on a classical model's hidden-state features (ESN reservoir
+    states, or LSTM/GRU hidden features — see config.WARM_START_SOURCE), then
+    SVD-based rank transfer to the QRC feature dim. Source-agnostic: any
+    (N, hidden_dim) feature matrix works.
     """
-    W_esn = _ridge_solve(X_train_esn, y_train, lambda_)
-    esn_dim, n_targets = W_esn.shape
+    W_src = _ridge_solve(X_train_classical, y_train, lambda_)
+    src_dim, n_targets = W_src.shape
 
-    if esn_dim == qrc_feature_dim:
-        logger.debug("Warm-start: ESN and QRC dims match — direct transfer")
-        return W_esn
+    if src_dim == qrc_feature_dim:
+        logger.debug("Warm-start: source and QRC dims match — direct transfer")
+        return W_src
 
     # Truncated / padded SVD transfer (deterministic, no random projection)
-    U, s, Vt = np.linalg.svd(W_esn, full_matrices=False)
+    U, s, Vt = np.linalg.svd(W_src, full_matrices=False)
     W_init = np.zeros((qrc_feature_dim, n_targets), dtype=np.float32)
-    k = min(qrc_feature_dim, esn_dim, len(s))
+    k = min(qrc_feature_dim, src_dim, len(s))
     W_init[:k, :] = (U[:k, :] * s[:k, np.newaxis]) @ Vt[:k, :]
-    logger.debug(f"Warm-start: SVD transfer ESN ({esn_dim}d) -> QRC ({qrc_feature_dim}d)")
+    logger.debug(f"Warm-start: SVD transfer ({src_dim}d) -> QRC ({qrc_feature_dim}d)")
     return W_init.astype(np.float32)
+
+
+# Backwards-compatible alias (old name, pre-generalisation)
+esn_warm_start_weights = classical_warm_start_weights
 
 
 # ── Main readout fitter ───────────────────────────────────────────────────────
@@ -137,10 +144,11 @@ class RidgeReadout:
     def fit(self,
             X_train: np.ndarray, y_train: np.ndarray,
             X_val:   np.ndarray, y_val:   np.ndarray,
-            X_train_esn: Optional[np.ndarray] = None) -> "ReadoutResult":
+            X_train_warm_start: Optional[np.ndarray] = None) -> "ReadoutResult":
         """
         Fit all modes × all lambdas; select best by val_rmse_mean.
-        X_train_esn: ESN reservoir states aligned with X_train (for warm-start).
+        X_train_warm_start: classical model's hidden-state features aligned
+            with X_train (see config.WARM_START_SOURCE — esn/lstm/gru).
         Returns best ReadoutResult.
         """
         n_targets = y_train.shape[1]
@@ -151,7 +159,7 @@ class RidgeReadout:
 
                 if mode == "joint":
                     W = self._fit_joint(X_train, y_train, lam,
-                                        X_train_esn, warm=self.warm_start)
+                                        X_train_warm_start, warm=self.warm_start)
                     val_pred = X_val @ W
                     val_rmse = _rmse_per_target(y_val, val_pred)
                     results.append(ReadoutResult(
@@ -169,7 +177,7 @@ class RidgeReadout:
                     for t in range(n_targets):
                         W_t = self._fit_joint(
                             X_train, y_train[:, t:t+1], lam,
-                            X_train_esn,
+                            X_train_warm_start,
                             warm=self.warm_start
                         )
                         W_all.append(W_t)
@@ -217,10 +225,10 @@ class RidgeReadout:
         return best
 
     def _fit_joint(self, X: np.ndarray, y: np.ndarray, lam: float,
-                   X_esn: Optional[np.ndarray], warm: bool) -> np.ndarray:
-        """Fit ridge; optionally warm-start from ESN weights."""
-        if warm and X_esn is not None:
-            W_init = esn_warm_start_weights(X_esn, y, lam, X.shape[1])
+                   X_warm: Optional[np.ndarray], warm: bool) -> np.ndarray:
+        """Fit ridge; optionally warm-start from the configured classical model's weights."""
+        if warm and X_warm is not None:
+            W_init = classical_warm_start_weights(X_warm, y, lam, X.shape[1])
             # Incorporate warm-start: shift X by W_init contribution
             # i.e. solve for residual δW around W_init
             residual = y - X @ W_init
