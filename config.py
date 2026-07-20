@@ -57,6 +57,8 @@ QRC_WARMUP       = 20
 QUBIT_COUNTS    = [5, 7, 9, 12, 16, 20]
 QUBIT_PRIMARY   = 9             # Primary reported result (matches Hou et al. 2026)
 
+USE_DATA_REUPLOADING = True
+
 # Hamiltonian: transverse-field Ising  H = -J ΣZᵢZⱼ - h ΣXᵢ
 J_SWEEP  = [0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
 H_SWEEP  = [0.1, 0.3, 0.5, 0.8, 1.0]
@@ -88,6 +90,40 @@ SHOT_COUNTS      = [None, 500, 1000, 5000]
 # Sweeps: cap train samples for Hamiltonian grid (None = use all)
 SWEEP_MAX_TRAIN_SAMPLES = 800
 
+# Real-hardware validation (scripts/hardware_validation.py): deliberately
+# small — the sweeps above already selected J*/h*/p*/topology*/n_qubits on
+# simulator; real QPU time is spent validating ONLY that final config over a
+# short subsampled window, not re-running the full pipeline (see
+# docs/PROJECT_CRITIQUE.md §3.2 for why running the whole sweep on hardware
+# is not feasible).
+HARDWARE_VALIDATION_STEPS = 50
+
+# ── QuEra Aquila (analog Rydberg) — reservoir/aquila_backend.py ────────────────
+# Aquila has no gate set: our J/h parameters must be re-expressed as REAL
+# physical quantities (interaction strength in rad/us via atom spacing, Rabi
+# frequency in rad/us) and validated against Aquila's published hardware
+# limits (bundled in the bloqade-analog SDK — see get_capabilities() below).
+# These scale factors are a DOCUMENTED, CONFIGURABLE DESIGN CHOICE, not a
+# literal unit conversion — see docs/PROJECT_CRITIQUE.md for the reasoning
+# and what "blockade regime" means here. Tune AQUILA_J_SCALE/AQUILA_H_SCALE
+# empirically once real or emulated hardware results are in hand.
+AQUILA_J_SCALE   = 20.0   # rad/us of Rydberg interaction V per unit of dimensionless J
+AQUILA_H_SCALE   = 3.0    # rad/us of global Rabi frequency Omega per unit of dimensionless h
+AQUILA_ENCODE_US = 0.1    # duration of each per-atom local-detuning encoding pulse
+AQUILA_DT_US     = 0.3    # duration of each Trotter "evolve" segment (global Rabi drive)
+AQUILA_ROTATION_US = 0.05 # duration of the basis-rotation pulse used for the X-readout
+# Hardware geometry safety margins (capabilities report exact minimums; a
+# small margin avoids landing exactly on a validator boundary due to
+# position_resolution rounding).
+AQUILA_MIN_SPACING_UM = 4.05
+AQUILA_MAX_WIDTH_UM   = 75.0
+AQUILA_MAX_HEIGHT_UM  = 76.0
+# "local_emulator" (free, Bloqade's own Python simulator — default, safe) |
+# "braket_local_emulator" (free, AWS Braket's local AHS simulator — stricter
+# validation, closer to what real submission requires) | "aquila" (REAL
+# hardware, via AWS Braket — consumes real QPU credits).
+AQUILA_SUBMIT_TARGET = "local_emulator"
+
 # ── Readout ───────────────────────────────────────────────────────────────────
 # Ridge regression: W* = (XᵀX + λI)⁻¹Xᵀy
 RIDGE_LAMBDAS    = [1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0]
@@ -98,13 +134,36 @@ RIDGE_LAMBDAS    = [1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0]
 MULTIOUTPUT_MODES = ["joint", "independent", "ensemble"]
 
 # ── Warm-start ────────────────────────────────────────────────────────────────
-# ESN trained first; its W_out initialises QRC ridge regression
-USE_WARM_START   = True
-ESN_HIDDEN_DIM   = 128          # Matched to QRC feature dimension (2 * n_qubits)
+# The chosen classical model is trained first; its hidden-state features
+# initialise the QRC ridge regression via SVD transfer (see
+# readout.ridge_readout.classical_warm_start_weights). Switch by editing this
+# ONE string — no other code changes needed.
+#   "esn"  — EchoStateNetwork.get_reservoir_states()      (recommended default:
+#             genuine cross-sample memory in every config, incl. shared PCA)
+#   "lstm" / "gru" — RNNWarmStartExtractor.get_hidden_states(); LSTM/GRU are
+#             now trained as genuine streaming sequence models (one
+#             continuous ordered pass, persistent hidden state, truncated
+#             BPTT — see RNN_WARMUP below), so this also carries real
+#             cross-sample memory, same as ESN.
+#   "arima" is NOT a valid value: ARIMA produces scalar per-target forecasts,
+#             not a reservoir-like hidden-state matrix, so it cannot warm-start
+#             a ridge readout. Selecting it raises a clear ValueError.
+USE_WARM_START     = True
+WARM_START_SOURCE  = "esn"      # "esn" | "lstm" | "gru"
+ESN_HIDDEN_DIM     = 128        # Matched to QRC feature dimension (2 * n_qubits)
 
 # ── Classical baselines ───────────────────────────────────────────────────────
 BASELINES = ["persistence", "arima", "esn", "lstm", "gru"]
-# Recurrent model config (LSTM/GRU share this, swappable via flag)
+# Recurrent model config (LSTM/GRU share this, swappable via flag).
+# LSTM/GRU are trained as ONE continuous ordered stream over the whole
+# training sequence (batch=1), exactly like EchoStateNetwork/IsingQRC, not as
+# independent windowed samples — this is what gives them genuine cross-sample
+# memory instead of degrading into a feedforward transform under shared PCA
+# (see docs/PROJECT_CRITIQUE.md §3.1, "Pass 4" entry).
+RNN_WARMUP      = 50    # Washout before scoring/loss — same role as ESN_WARMUP
+# RNN_BATCH is now the truncated-BPTT chunk length (contiguous ordered steps
+# per gradient update), not an i.i.d. minibatch size — there is no batch
+# dimension left to shuffle once the model sees one continuous sequence.
 RNN_HIDDEN      = 64
 RNN_LAYERS      = 2
 RNN_EPOCHS      = 50

@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (TARGETS, HORIZONS, QUBIT_PRIMARY, J_DEFAULT, H_DEFAULT,
                     TOPOLOGY_PRIMARY, RESULTS, WINDOW_SIZE,
-                    USE_SHARED_PCA, ESN_WARMUP, QRC_WARMUP)
+                    USE_SHARED_PCA, ESN_WARMUP, QRC_WARMUP, WARM_START_SOURCE,
+                    USE_DATA_REUPLOADING)
 from utils import get_logger
 
 logger = get_logger("main")
@@ -41,11 +42,38 @@ def _load_sweep_results(out_dir: Path) -> tuple:
     if jh.exists():
         d = json.load(open(jh))
         J, h = d["J_star"], d["h_star"]
+        _warn_if_stale_reuploading(jh.name, d)
     if jn.exists():
-        p = json.load(open(jn))["p_star"]
+        d = json.load(open(jn))
+        p = d["p_star"]
+        _warn_if_stale_reuploading(jn.name, d)
     if jt.exists():
-        topology = json.load(open(jt))["topology_star"]
+        d = json.load(open(jt))
+        topology = d["topology_star"]
+        _warn_if_stale_reuploading(jt.name, d)
     return J, h, p, topology
+
+
+def _warn_if_stale_reuploading(filename: str, cached: dict):
+    """
+    Cached sweep JSON records the encoding it was produced under. J*/h*/p*
+    found under standard encoding are not necessarily optimal under
+    data-reuploading (and vice versa) — --skip_sweeps must not silently
+    reuse stale winners after USE_DATA_REUPLOADING changes.
+    """
+    from config import USE_DATA_REUPLOADING
+    cached_flag = cached.get("use_data_reuploading")
+    if cached_flag is None:
+        logger.warning(f"{filename} predates the reuploading flag being recorded — "
+                       f"cannot verify it matches current USE_DATA_REUPLOADING="
+                       f"{USE_DATA_REUPLOADING}. Re-run sweeps (drop --skip_sweeps) "
+                       f"to regenerate it cleanly.")
+    elif cached_flag != USE_DATA_REUPLOADING:
+        logger.warning(f"{filename} was produced with use_data_reuploading="
+                       f"{cached_flag}, but config.USE_DATA_REUPLOADING is now "
+                       f"{USE_DATA_REUPLOADING}. These sweep winners (J*/h*/p*/topology*) "
+                       f"are STALE for the current encoding — re-run sweeps "
+                       f"(drop --skip_sweeps) before trusting this run's results.")
 
 
 def _qrc_warmup(n: int) -> int:
@@ -61,6 +89,40 @@ def _align_after_warmup(H, y, warmup: int):
 def _model_inputs(ds, n_qubits: int):
     from preprocessing.projection import maybe_project_dataset
     return maybe_project_dataset(ds, n_qubits)
+
+
+def _resolve_warm_start_states(fitted_esn, fitted_rnn: dict, X_train):
+    """
+    Extract the warm-start hidden-state matrix from whichever classical model
+    config.WARM_START_SOURCE points at. Source-agnostic by design so switching
+    the warm-start layer (ESN/LSTM/GRU) is a one-line config.py edit — see
+    config.WARM_START_SOURCE and docs/PROJECT_CRITIQUE.md.
+    """
+    from config import WARM_START_SOURCE
+    source = WARM_START_SOURCE.lower()
+
+    if source == "arima":
+        raise ValueError(
+            "WARM_START_SOURCE='arima' is invalid: ARIMA produces scalar "
+            "per-target forecasts, not a reservoir-like hidden-state matrix, "
+            "so it cannot warm-start the QRC ridge readout. Use 'esn', "
+            "'lstm', or 'gru'."
+        )
+    if source == "esn":
+        if fitted_esn is None:
+            logger.warning("WARM_START_SOURCE='esn' but ESN did not fit — warm-start disabled")
+            return None
+        return fitted_esn.get_reservoir_states(X_train)
+    if source in ("lstm", "gru"):
+        extractor = fitted_rnn.get(source)
+        if extractor is None:
+            logger.warning(f"WARM_START_SOURCE='{source}' but {source.upper()} did not fit "
+                           f"— warm-start disabled")
+            return None
+        return extractor.get_hidden_states(X_train)
+
+    raise ValueError(f"Unknown WARM_START_SOURCE={WARM_START_SOURCE!r}; "
+                     f"expected 'esn', 'lstm', or 'gru'.")
 
 
 def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
@@ -82,41 +144,70 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
 
     all_results = {}
     fitted_esn = None
-    X_train_esn = None
+    fitted_rnn = {}
+    baseline_status = {}   # model -> {"status": "ok"|"skipped"|"failed", "reason": str}
 
     if not args.skip_baselines:
         try:
             r = run_persistence(y_val, y_test, ds.X_val, ds.X_test, window=WINDOW_SIZE)
             all_results["persistence"] = r
             r.save(RESULTS / f"h{h_val}")
+            baseline_status["persistence"] = {"status": "ok"}
         except Exception as e:
             logger.error(f"Persistence failed (h={h_val}h): {e}")
+            baseline_status["persistence"] = {"status": "failed", "reason": str(e)}
 
         try:
+            from baselines.classical import ARIMA_AVAILABLE
             r = run_arima(y_train, y_val, y_test, TARGETS)
             if r:
                 all_results["arima"] = r
                 r.save(RESULTS / f"h{h_val}")
+                baseline_status["arima"] = {"status": "ok", "backend": r.meta.get("backend")}
+            else:
+                reason = ("no ARIMA backend installed (pip install statsmodels pmdarima)"
+                          if not ARIMA_AVAILABLE else "run_arima returned no result")
+                logger.error(f"ARIMA MISSING from results (h={h_val}h): {reason}")
+                baseline_status["arima"] = {"status": "skipped", "reason": reason}
         except Exception as e:
             logger.error(f"ARIMA failed (h={h_val}h): {e}")
+            baseline_status["arima"] = {"status": "failed", "reason": str(e)}
 
         try:
             r_esn, fitted_esn = run_esn(X_train, y_train, X_val, y_val, X_test, y_test)
             all_results["esn"] = r_esn
             r_esn.save(RESULTS / f"h{h_val}")
-            X_train_esn = fitted_esn.get_reservoir_states(X_train)
+            baseline_status["esn"] = {"status": "ok"}
         except Exception as e:
             logger.error(f"ESN failed (h={h_val}h): {e}")
+            baseline_status["esn"] = {"status": "failed", "reason": str(e)}
 
         for model_type in ("lstm", "gru"):
             try:
-                r = run_rnn(X_train, y_train, X_val, y_val, X_test, y_test,
-                            window=WINDOW_SIZE, model_type=model_type)
+                r, wrapper = run_rnn(X_train, y_train, X_val, y_val, X_test, y_test,
+                                      window=WINDOW_SIZE, model_type=model_type)
                 if r:
                     all_results[model_type] = r
                     r.save(RESULTS / f"h{h_val}")
+                    fitted_rnn[model_type] = wrapper
+                    baseline_status[model_type] = {"status": "ok"}
+                else:
+                    baseline_status[model_type] = {"status": "skipped",
+                                                   "reason": "PyTorch not installed"}
             except Exception as e:
                 logger.error(f"{model_type.upper()} failed (h={h_val}h): {e}")
+                baseline_status[model_type] = {"status": "failed", "reason": str(e)}
+
+    out_h = RESULTS / f"h{h_val}"
+    out_h.mkdir(parents=True, exist_ok=True)
+    with open(out_h / "baseline_status.json", "w") as f:
+        json.dump(baseline_status, f, indent=2)
+    missing = [m for m, s in baseline_status.items() if s["status"] != "ok"]
+    if missing:
+        logger.warning(f"Baselines NOT in results_h{h_val}.csv: {missing} "
+                       f"(see {out_h / 'baseline_status.json'} for reasons)")
+
+    X_train_warm = _resolve_warm_start_states(fitted_esn, fitted_rnn, X_train)
 
     w = _qrc_warmup(len(X_train))
 
@@ -126,6 +217,7 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
             qrc = IsingQRC(
                 n_qubits=args.n_qubits, J=J_star, h=h_star,
                 noise_rate=p_star, topology=topology_star,
+                use_data_reuploading=USE_DATA_REUPLOADING,
                 platform=args.platform,
             )
             H_train = qrc.run_sequence(X_train, warmup=w)
@@ -136,36 +228,43 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
             H_vl, y_vl = _align_after_warmup(H_val, y_val, w)
             H_ts, y_ts = _align_after_warmup(H_test, y_test, w)
 
-            X_esn = None
-            if use_warm and X_train_esn is not None:
-                n_align = min(len(H_tr), len(X_train_esn))
+            X_warm = None
+            if use_warm and X_train_warm is not None:
+                n_align = min(len(H_tr), len(X_train_warm))
                 H_tr, y_tr = H_tr[-n_align:], y_tr[-n_align:]
-                X_esn = X_train_esn[-n_align:]
+                X_warm = X_train_warm[-n_align:]
 
             readout = RidgeReadout(
                 target_names=TARGETS,
-                warm_start=use_warm and (X_esn is not None),
+                warm_start=use_warm and (X_warm is not None),
             )
-            best = readout.fit(H_tr, y_tr, H_vl, y_vl, X_train_esn=X_esn)
+            best = readout.fit(H_tr, y_tr, H_vl, y_vl, X_train_warm_start=X_warm)
             readout.save_selection_log(RESULTS / f"h{h_val}")
 
-            class _QRCResult:
-                def __init__(self, name, pv, pt, offset):
-                    self.name = name
-                    self.y_pred_val = pv
-                    self.y_pred_test = pt
-                    self.label_offset = offset
-
-            all_results[mode_label] = _QRCResult(
-                mode_label, best.predict(H_vl), best.predict(H_ts), w
+            from baselines.classical import BaselineResult
+            from evaluation.metrics import rmse_per_target
+            pred_val, pred_test = best.predict(H_vl), best.predict(H_ts)
+            qrc_result = BaselineResult(
+                name=mode_label, y_pred_val=pred_val, y_pred_test=pred_test,
+                val_rmse=rmse_per_target(y_vl, pred_val),
+                test_rmse=rmse_per_target(y_ts, pred_test),
+                meta={"type": mode_label, "readout_strategy": best.strategy},
+                label_offset=w,
             )
+            all_results[mode_label] = qrc_result
 
             out_h = RESULTS / f"h{h_val}"
             out_h.mkdir(parents=True, exist_ok=True)
+            # Persisted (not just kept in-memory) so a separate later process —
+            # e.g. agent_runner.py's benchmark_all task run standalone — can
+            # reconstruct the full results table without re-driving the
+            # reservoir. Matches how persistence/arima/esn/lstm/gru already save.
+            qrc_result.save(out_h)
             best.save(out_h / f"{mode_label}_readout.pkl")
             cfg = qrc.get_config()
             cfg.update(horizon_hours=h_val, readout_strategy=best.strategy,
-                       warm_start=use_warm, shared_pca=USE_SHARED_PCA)
+                       warm_start=use_warm, warm_start_source=WARM_START_SOURCE,
+                       shared_pca=USE_SHARED_PCA)
             with open(out_h / f"{mode_label}_config.json", "w") as f:
                 json.dump(cfg, f, indent=2)
         except Exception as e:
@@ -179,7 +278,17 @@ def run_pipeline(args):
     logger.info("=" * 70)
     logger.info("ResQue QRC Pipeline — GIC 2026")
     logger.info(f"Platform: {args.platform}  Smoke: {args.smoke_test}  Shared PCA: {USE_SHARED_PCA}")
+    logger.info(f"Reuploading: {USE_DATA_REUPLOADING}  Warm-start source: {WARM_START_SOURCE}")
     logger.info("=" * 70)
+
+    from baselines.classical import ARIMA_AVAILABLE, TORCH_AVAILABLE
+    if not ARIMA_AVAILABLE:
+        logger.error("ARIMA baseline will be ABSENT from all results tables this run "
+                     "(no pmdarima or statsmodels installed). "
+                     "pip install statsmodels pmdarima to include it.")
+    if not TORCH_AVAILABLE:
+        logger.error("LSTM/GRU baselines will be ABSENT from all results tables this run "
+                     "(PyTorch not installed). pip install torch to include them.")
 
     from data.downloader import download_all
     from data.parser import load_and_merge

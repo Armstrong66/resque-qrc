@@ -20,7 +20,7 @@ from itertools import product
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (J_SWEEP, H_SWEEP, NOISE_RATES, QUBIT_COUNTS,
                     SHOT_COUNTS, TOPOLOGIES, RESULTS, RANDOM_SEED, QRC_WARMUP,
-                    SWEEP_MAX_TRAIN_SAMPLES)
+                    SWEEP_MAX_TRAIN_SAMPLES, USE_DATA_REUPLOADING)
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -70,26 +70,37 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
                       X_val: np.ndarray, y_val: np.ndarray,
                       n_qubits: int = 9,
                       topology: str = "chain",
+                      use_data_reuploading: bool = None,
                       out_dir: Path = None) -> tuple[float, float, pd.DataFrame]:
     """
     Sweep J ∈ J_SWEEP × h ∈ H_SWEEP. Returns (J*, h*, results_df).
     Also saves a CSV heatmap for figures.
+
+    use_data_reuploading: defaults to config.USE_DATA_REUPLOADING. J*/h* are
+    encoding-dependent (reuploading changes the effective circuit), so the
+    winning values and the encoding that produced them are both recorded in
+    best_hamiltonian.json — re-running this sweep with reuploading enabled
+    for the first time will overwrite that file with new J*/h*, as expected.
     """
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
+    use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
+                            else use_data_reuploading)
 
     X_train, y_train, X_val, y_val = _subsample_sweep_data(X_train, y_train, X_val, y_val)
 
     logger.info(f"=== Hamiltonian sweep: {len(J_SWEEP)}x{len(H_SWEEP)} "
-                f"= {len(J_SWEEP)*len(H_SWEEP)} configs, n_qubits={n_qubits} ===")
+                f"= {len(J_SWEEP)*len(H_SWEEP)} configs, n_qubits={n_qubits}, "
+                f"reuploading={use_data_reuploading} ===")
 
     rows = []
     best_rmse = float("inf")
     best_J, best_h = J_SWEEP[0], H_SWEEP[0]
 
     for J, h in product(J_SWEEP, H_SWEEP):
-        qrc = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topology, noise_rate=0.0)
+        qrc = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topology, noise_rate=0.0,
+                       use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         rows.append({"J": J, "h": h, "val_rmse": rmse})
         logger.debug(f"  J={J:.2f} h={h:.2f} → val_rmse={rmse:.4f}")
@@ -105,7 +116,8 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
                 f"val_rmse={best_rmse:.4f}")
     with open(out_dir / "best_hamiltonian.json", "w") as f:
         json.dump({"J_star": best_J, "h_star": best_h,
-                   "val_rmse": best_rmse, "n_qubits": n_qubits}, f, indent=2)
+                   "val_rmse": best_rmse, "n_qubits": n_qubits,
+                   "use_data_reuploading": use_data_reuploading}, f, indent=2)
     return best_J, best_h, df
 
 
@@ -115,6 +127,7 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
                 X_val: np.ndarray, y_val: np.ndarray,
                 J: float, h: float,
                 n_qubits: int = 9,
+                use_data_reuploading: bool = None,
                 out_dir: Path = None) -> tuple[float, pd.DataFrame]:
     """
     Sweep depolarizing noise rates. Returns (p*, results_df).
@@ -123,16 +136,19 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
+    use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
+                            else use_data_reuploading)
 
     logger.info(f"=== Noise sweep: {len(NOISE_RATES)} rates, "
-                f"J={J} h={h} n_qubits={n_qubits} ===")
+                f"J={J} h={h} n_qubits={n_qubits} reuploading={use_data_reuploading} ===")
 
     rows = []
     best_rmse = float("inf")
     best_p    = 0.0
 
     for p in NOISE_RATES:
-        qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, noise_rate=p)
+        qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, noise_rate=p,
+                        use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         rows.append({"noise_rate": p, "val_rmse": rmse})
         logger.info(f"  p={p:.4f} → val_rmse={rmse:.4f}")
@@ -152,7 +168,8 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
         logger.info(f"Noiseless is optimal (p*=0). No noise-assisted benefit observed.")
 
     with open(out_dir / "best_noise.json", "w") as f:
-        json.dump({"p_star": best_p, "val_rmse": best_rmse}, f, indent=2)
+        json.dump({"p_star": best_p, "val_rmse": best_rmse,
+                   "use_data_reuploading": use_data_reuploading}, f, indent=2)
     return best_p, df
 
 
@@ -162,6 +179,7 @@ def qubit_scaling_study(X_train: np.ndarray, y_train: np.ndarray,
                          X_val:   np.ndarray, y_val:   np.ndarray,
                          J: float, h: float, p: float,
                          qubit_counts: list = None,
+                         use_data_reuploading: bool = None,
                          out_dir: Path = None) -> pd.DataFrame:
     """
     Run QRC across all configured qubit counts [5, 7, 9, 12, 16, 20].
@@ -172,16 +190,20 @@ def qubit_scaling_study(X_train: np.ndarray, y_train: np.ndarray,
     qubit_counts = qubit_counts or QUBIT_COUNTS
     out_dir      = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
+    use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
+                            else use_data_reuploading)
 
-    logger.info(f"=== Qubit scaling study: n ∈ {qubit_counts} ===")
+    logger.info(f"=== Qubit scaling study: n ∈ {qubit_counts} reuploading={use_data_reuploading} ===")
 
     rows = []
     for n in qubit_counts:
-        qrc  = IsingQRC(n_qubits=n, J=J, h=h, noise_rate=p)
+        qrc  = IsingQRC(n_qubits=n, J=J, h=h, noise_rate=p,
+                        use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         feature_dim = 2 * n
         rows.append({"n_qubits": n, "feature_dim": feature_dim,
-                     "val_rmse": rmse, "J": J, "h": h, "noise_rate": p})
+                     "val_rmse": rmse, "J": J, "h": h, "noise_rate": p,
+                     "use_data_reuploading": use_data_reuploading})
         logger.info(f"  n={n:2d} features={feature_dim:3d} → val_rmse={rmse:.4f}")
 
     df = pd.DataFrame(rows)
@@ -195,6 +217,7 @@ def qubit_scaling_study(X_train: np.ndarray, y_train: np.ndarray,
 def shot_ablation(X_train: np.ndarray, y_train: np.ndarray,
                    X_val: np.ndarray, y_val: np.ndarray,
                    J: float, h: float, p: float, n_qubits: int = 9,
+                   use_data_reuploading: bool = None,
                    out_dir: Path = None) -> pd.DataFrame:
     """
     Compare performance at different shot budgets.
@@ -204,12 +227,16 @@ def shot_ablation(X_train: np.ndarray, y_train: np.ndarray,
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
+    use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
+                            else use_data_reuploading)
 
-    logger.info(f"=== Shot ablation: budgets={SHOT_COUNTS} ===")
+    logger.info(f"=== Shot ablation: budgets={SHOT_COUNTS} noise_rate={p} "
+                f"reuploading={use_data_reuploading} ===")
 
     rows = []
     for shots in SHOT_COUNTS:
-        qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, noise_rate=p, shots=shots)
+        qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, noise_rate=p, shots=shots,
+                        use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         label = "∞ (exact)" if shots is None else str(shots)
         rows.append({"shots": label, "val_rmse": rmse})
@@ -225,18 +252,22 @@ def shot_ablation(X_train: np.ndarray, y_train: np.ndarray,
 def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
                           X_val: np.ndarray, y_val: np.ndarray,
                           J: float, h: float, n_qubits: int = 9,
+                          use_data_reuploading: bool = None,
                           out_dir: Path = None) -> tuple[str, pd.DataFrame]:
     """Compare chain vs all-to-all topology. Returns (best_topology, df)."""
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
+    use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
+                            else use_data_reuploading)
 
     rows = []
     best_rmse = float("inf")
     best_topo = TOPOLOGIES[0]
 
     for topo in TOPOLOGIES:
-        qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topo)
+        qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topo,
+                        use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         rows.append({"topology": topo, "val_rmse": rmse})
         logger.info(f"  topology={topo:<12} → val_rmse={rmse:.4f}")
@@ -247,6 +278,7 @@ def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "topology_comparison.csv", index=False)
     with open(out_dir / "best_topology.json", "w") as f:
-        json.dump({"topology_star": best_topo, "val_rmse": best_rmse}, f, indent=2)
+        json.dump({"topology_star": best_topo, "val_rmse": best_rmse,
+                   "use_data_reuploading": use_data_reuploading}, f, indent=2)
     logger.info(f"Topology sweep done. Best: {best_topo} (val_rmse={best_rmse:.4f})")
     return best_topo, df
