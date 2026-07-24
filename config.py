@@ -90,6 +90,11 @@ SHOT_COUNTS      = [None, 500, 1000, 5000]
 # Sweeps: cap train samples for Hamiltonian grid (None = use all)
 SWEEP_MAX_TRAIN_SAMPLES = 800
 
+# Noise sweep: use fewer steps because default.mixed (density matrix) is slower
+# than default.qubit (state vector). 50 is enough to select p*; full convergence
+# is not required for noise-rate selection.
+NOISE_SWEEP_MAX_SAMPLES = 50
+
 # Real-hardware validation (scripts/hardware_validation.py): deliberately
 # small — the sweeps above already selected J*/h*/p*/topology*/n_qubits on
 # simulator; real QPU time is spent validating ONLY that final config over a

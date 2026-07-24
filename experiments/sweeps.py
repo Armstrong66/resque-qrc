@@ -20,7 +20,8 @@ from itertools import product
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (J_SWEEP, H_SWEEP, NOISE_RATES, QUBIT_COUNTS,
                     SHOT_COUNTS, TOPOLOGIES, RESULTS, RANDOM_SEED, QRC_WARMUP,
-                    SWEEP_MAX_TRAIN_SAMPLES, USE_DATA_REUPLOADING)
+                    SWEEP_MAX_TRAIN_SAMPLES, NOISE_SWEEP_MAX_SAMPLES,
+                    USE_DATA_REUPLOADING)
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -33,7 +34,8 @@ def _qrc_warmup(n_samples: int) -> int:
 
 def _subsample_sweep_data(X_train, y_train, X_val, y_val, max_n: int = None):
     """Use a fixed prefix of train/val for faster sweeps (temporal order preserved)."""
-    max_n = max_n if max_n is not None else SWEEP_MAX_TRAIN_SAMPLES
+    if max_n is None:
+        max_n = SWEEP_MAX_TRAIN_SAMPLES
     if max_n is None or len(X_train) <= max_n:
         return X_train, y_train, X_val, y_val
     logger.info(f"Sweep subsample: using first {max_n}/{len(X_train)} train windows")
@@ -138,6 +140,12 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
     out_dir.mkdir(parents=True, exist_ok=True)
     use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
                             else use_data_reuploading)
+
+    # Use fewer samples for noise sweep because default.mixed (density matrix)
+    # is O(4ⁿ) vs default.qubit's O(2ⁿ) — 50 steps is enough for p* selection
+    X_train, y_train, X_val, y_val = _subsample_sweep_data(
+        X_train, y_train, X_val, y_val, max_n=NOISE_SWEEP_MAX_SAMPLES
+    )
 
     logger.info(f"=== Noise sweep: {len(NOISE_RATES)} rates, "
                 f"J={J} h={h} n_qubits={n_qubits} reuploading={use_data_reuploading} ===")
