@@ -1,5 +1,5 @@
 """
-readout/ridge_readout.py — Analytical ridge regression readout for QRC.
+readout/ridge_readout.py - Analytical ridge regression readout for QRC.
 
 W* = (XᵀX + λI)⁻¹Xᵀy   ← closed-form, no gradient descent.
 
@@ -63,7 +63,7 @@ def _ridge_solve(X: np.ndarray, y: np.ndarray, lambda_: float) -> np.ndarray:
     """
     d = X.shape[1]
     try:
-        # Gram matrix solve — efficient when N > d
+        # Gram matrix solve - efficient when N > d
         A = X.T @ X + lambda_ * np.eye(d)
         b = X.T @ y
         W = np.linalg.solve(A, b)
@@ -89,15 +89,32 @@ def classical_warm_start_weights(X_train_classical: np.ndarray,
                                   qrc_feature_dim: int) -> np.ndarray:
     """
     Ridge readout on a classical model's hidden-state features (ESN reservoir
-    states, or LSTM/GRU hidden features — see config.WARM_START_SOURCE), then
+    states, or LSTM/GRU hidden features - see config.WARM_START_SOURCE), then
     SVD-based rank transfer to the QRC feature dim. Source-agnostic: any
     (N, hidden_dim) feature matrix works.
+
+    Note: X_train_classical and y_train must have the same number of samples N.
+    If they differ, this function takes the minimum overlap.
     """
+    # Ensure X_train_classical and y_train have matching sample counts
+    n_classical = X_train_classical.shape[0]
+    n_y = y_train.shape[0]
+    n_min = min(n_classical, n_y)
+
+    if n_classical != n_y:
+        logger.warning(
+            f"Warm-start alignment: X_train_classical has {n_classical} samples "
+            f"but y_train has {n_y} samples. Using first {n_min} samples."
+        )
+
+    X_train_classical = X_train_classical[:n_min]
+    y_train = y_train[:n_min]
+
     W_src = _ridge_solve(X_train_classical, y_train, lambda_)
     src_dim, n_targets = W_src.shape
 
     if src_dim == qrc_feature_dim:
-        logger.debug("Warm-start: source and QRC dims match — direct transfer")
+        logger.debug("Warm-start: source and QRC dims match - direct transfer")
         return W_src
 
     # Truncated / padded SVD transfer (deterministic, no random projection)
@@ -120,9 +137,9 @@ class RidgeReadout:
     Fits and selects the best readout strategy for QRC states.
 
     Strategies:
-      "joint"       — single W* mapping all features → all targets
-      "independent" — one W* per target, independently
-      "ensemble"    — average predictions of independent models
+      "joint"       - single W* mapping all features → all targets
+      "independent" - one W* per target, independently
+      "ensemble"    - average predictions of independent models
 
     Warm-start option available for each strategy.
     Auto-selects best by validation RMSE. Decision logged transparently.
@@ -148,7 +165,7 @@ class RidgeReadout:
         """
         Fit all modes × all lambdas; select best by val_rmse_mean.
         X_train_warm_start: classical model's hidden-state features aligned
-            with X_train (see config.WARM_START_SOURCE — esn/lstm/gru).
+            with X_train (see config.WARM_START_SOURCE - esn/lstm/gru).
         Returns best ReadoutResult.
         """
         n_targets = y_train.shape[1]
@@ -195,7 +212,7 @@ class RidgeReadout:
                     ))
 
         # ── Ensemble: average predictions of best independent + best joint ─
-        # (Separate from the modes loop above — done after all individual fits)
+        # (Separate from the modes loop above - done after all individual fits)
         ind_results  = [r for r in results if r.strategy == "independent"]
         joint_results = [r for r in results if r.strategy == "joint"]
         if "ensemble" in self.modes and ind_results and joint_results:
@@ -239,7 +256,7 @@ class RidgeReadout:
     def _log_selection(self, all_results: list, best: ReadoutResult):
         """Transparently log the selection decision to console and log file."""
         logger.info("=" * 60)
-        logger.info("READOUT SELECTION — val RMSE summary")
+        logger.info("READOUT SELECTION - val RMSE summary")
         logger.info(f"{'Strategy':<14} {'WarmStart':<10} {'Lambda':<10} {'Val RMSE (mean)'}")
         logger.info("-" * 60)
         for r in sorted(all_results, key=lambda x: x.val_rmse_mean):
