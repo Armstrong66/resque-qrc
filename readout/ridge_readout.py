@@ -274,10 +274,19 @@ class RidgeReadout:
                       zip(self.target_names, best.val_rmse)}
         logger.info(f"Per-target val RMSE: {per_target}")
 
-    def save_selection_log(self, out_dir: Path = None):
-        """Save selection summary as JSON for the qBraid Skill agent."""
+    def save_selection_log(self, out_dir: Path = None,
+                           filename: str = "readout_selection.json"):
+        """Save a readout-selection summary without overwriting another mode.
+
+        ``filename`` retains the historic default for standalone callers.
+        Pipelines evaluating multiple readout modes should supply a distinct
+        mode-specific filename (for example ``cold_start_qrc_readout_selection.json``).
+        """
         out_dir = out_dir or RESULTS
         out_dir.mkdir(parents=True, exist_ok=True)
+        filename = Path(filename).name
+        if not filename.endswith(".json"):
+            raise ValueError("Readout selection log filename must end with '.json'.")
         summary = [
             {
                 "strategy":       r.strategy,
@@ -289,7 +298,7 @@ class RidgeReadout:
             }
             for r in sorted(self._all_results_, key=lambda x: x.val_rmse_mean)
         ]
-        path = out_dir / "readout_selection.json"
+        path = out_dir / filename
         with open(path, "w") as f:
             json.dump(summary, f, indent=2)
         logger.info(f"Selection log saved -> {path}")

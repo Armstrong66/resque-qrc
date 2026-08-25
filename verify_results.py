@@ -44,24 +44,25 @@ def _expected_files(horizons: list) -> dict:
     """Maps a human label to the Path expected to exist. Sweep-level files
     are expected once (not per horizon); per-horizon files repeat per h."""
     files = {
-        "hamiltonian_sweep.csv": RESULTS / "hamiltonian_sweep.csv",
-        "best_hamiltonian.json": RESULTS / "best_hamiltonian.json",
         "noise_sweep.csv":       RESULTS / "noise_sweep.csv",
         "best_noise.json":       RESULTS / "best_noise.json",
-        "topology_comparison.csv": RESULTS / "topology_comparison.csv",
-        "best_topology.json":    RESULTS / "best_topology.json",
         "qubit_scaling.csv":     RESULTS / "qubit_scaling.csv",
         "shot_ablation.csv":     RESULTS / "shot_ablation.csv",
-        "encoding_ablation.json": RESULTS / "encoding_ablation.json",
     }
     for h in horizons:
         out_h = RESULTS / f"h{h}"
+        files[f"best_qrc_architecture_h{h}.json"] = RESULTS / f"best_qrc_architecture_h{h}.json"
+        files[f"encoding_hamiltonian_comparison_h{h}.csv"] = (
+            RESULTS / f"encoding_hamiltonian_comparison_h{h}.csv"
+        )
         files[f"results_h{h}.csv"] = RESULTS / f"results_h{h}.csv"
         files[f"h{h}/baseline_status.json"] = out_h / "baseline_status.json"
-        files[f"h{h}/readout_selection.json"] = out_h / "readout_selection.json"
         for mode in ("cold_start_qrc", "warm_start_qrc"):
             files[f"h{h}/{mode}_config.json"] = out_h / f"{mode}_config.json"
             files[f"h{h}/{mode}_readout.pkl"] = out_h / f"{mode}_readout.pkl"
+            files[f"h{h}/{mode}_readout_selection.json"] = (
+                out_h / f"{mode}_readout_selection.json"
+            )
     return files
 
 

@@ -27,7 +27,9 @@ def plot_hamiltonian_heatmap(csv_path: Path = None, out_path: Path = None):
         return
     import pandas as pd
 
-    csv_path = csv_path or (RESULTS / "hamiltonian_sweep.csv")
+    if csv_path is None:
+        candidates = sorted(RESULTS.glob("hamiltonian_sweep_h*_*.csv"))
+        csv_path = candidates[0] if candidates else (RESULTS / "hamiltonian_sweep.csv")
     if not csv_path.exists():
         logger.debug(f"No hamiltonian sweep at {csv_path}")
         return
@@ -123,7 +125,12 @@ def generate_all_figures(results_dir: Path = None):
     """Generate all plots from existing sweep/result CSVs."""
     results_dir = results_dir or RESULTS
     FIGURES.mkdir(parents=True, exist_ok=True)
-    plot_hamiltonian_heatmap(results_dir / "hamiltonian_sweep.csv")
+    # Paired architecture selection writes one grid per horizon and encoding.
+    # Plot each grid separately rather than mixing two encodings in one pivot.
+    for csv_path in sorted(results_dir.glob("hamiltonian_sweep_h*_*.csv")):
+        plot_hamiltonian_heatmap(
+            csv_path, FIGURES / f"{csv_path.stem}_heatmap.png"
+        )
     plot_noise_sweep(results_dir / "noise_sweep.csv")
     plot_qubit_scaling(results_dir / "qubit_scaling.csv")
     for p in sorted(results_dir.glob("results_h*.csv")):

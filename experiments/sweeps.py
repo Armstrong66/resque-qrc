@@ -23,7 +23,7 @@ from config import (J_SWEEP, H_SWEEP, NOISE_RATES, QUBIT_COUNTS,
                     SHOT_COUNTS, TOPOLOGIES, RESULTS, RANDOM_SEED, QRC_WARMUP,
                     SWEEP_MAX_TRAIN_SAMPLES, SWEEP_MAX_VAL_SAMPLES,
                     NOISE_SWEEP_MAX_SAMPLES, NOISE_SWEEP_MAX_VAL_SAMPLES,
-                    USE_DATA_REUPLOADING)
+                    USE_DATA_REUPLOADING, ENCODING_OPTIONS, TARGETS, RIDGE_LAMBDAS)
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -50,8 +50,16 @@ def _subsample_sweep_data(X_train, y_train, X_val, y_val,
     return X_train[:n_train], y_train[:n_train], X_val[:n_val], y_val[:n_val]
 
 
-def _quick_eval(qrc, X_train, y_train, X_val, y_val, lambda_=1e-3):
-    """Run reservoir and evaluate with ridge regression. Returns val RMSE mean."""
+def _quick_eval(qrc, X_train, y_train, X_val, y_val, lambdas=None,
+                return_lambda: bool = False):
+    """Evaluate a reservoir with validation-selected cold ridge regularization.
+
+    For a fixed lambda, ordinary multi-output ridge separates across target
+    columns, so joint and independent cold fits are algebraically identical.
+    Selecting the best lambda here therefore matches the relevant downstream
+    cold-readout model-selection criterion without repeatedly logging every
+    full readout candidate during a Hamiltonian grid search.
+    """
     from readout.ridge_readout import _ridge_solve, _rmse_per_target
 
     try:
@@ -66,12 +74,16 @@ def _quick_eval(qrc, X_train, y_train, X_val, y_val, lambda_=1e-3):
         min_len = min(len(H_val), len(y_vl))
         H_val, y_vl = H_val[:min_len], y_vl[:min_len]
 
-        W    = _ridge_solve(H_train, y_tr, lambda_)
-        pred = H_val @ W
-        return float(_rmse_per_target(y_vl, pred).mean())
+        best_rmse, best_lambda = float("inf"), None
+        for lambda_ in (RIDGE_LAMBDAS if lambdas is None else lambdas):
+            W = _ridge_solve(H_train, y_tr, lambda_)
+            rmse = float(_rmse_per_target(y_vl, H_val @ W).mean())
+            if rmse < best_rmse:
+                best_rmse, best_lambda = rmse, lambda_
+        return (best_rmse, best_lambda) if return_lambda else best_rmse
     except Exception as e:
         logger.error(f"Quick eval failed: {e}")
-        return float("inf")
+        return (float("inf"), None) if return_lambda else float("inf")
 
 
 # ── 1. Memory–nonlinearity tradeoff sweep ─────────────────────────────────────
@@ -81,7 +93,8 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
                       n_qubits: int = 9,
                       topology: str = "chain",
                       use_data_reuploading: bool = None,
-                      out_dir: Path = None) -> tuple[float, float, pd.DataFrame]:
+                      out_dir: Path = None,
+                      artifact_stem: str = "hamiltonian_sweep") -> tuple[float, float, pd.DataFrame]:
     """
     Sweep J ∈ J_SWEEP × h ∈ H_SWEEP. Returns (J*, h*, results_df).
     Also saves a CSV heatmap for figures.
@@ -112,9 +125,11 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
         t0 = time.perf_counter()
         qrc = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topology, noise_rate=0.0,
                        use_data_reuploading=use_data_reuploading)
-        rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
+        rmse, lambda_ = _quick_eval(qrc, X_train, y_train, X_val, y_val,
+                                    return_lambda=True)
         rows.append({"J": J, "h": h, "val_rmse": rmse,
-                     "n_train": len(X_train), "n_val": len(X_val)})
+                     "ridge_lambda": lambda_, "n_train": len(X_train), "n_val": len(X_val),
+                     "use_data_reuploading": use_data_reuploading})
         logger.info("  Hamiltonian config J=%.2f h=%.2f completed in %.1fs",
                     J, h, time.perf_counter() - t0)
         logger.debug(f"  J={J:.2f} h={h:.2f} → val_rmse={rmse:.4f}")
@@ -124,17 +139,67 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
             best_J, best_h = J, h
 
     df = pd.DataFrame(rows)
-    df.to_csv(out_dir / "hamiltonian_sweep.csv", index=False)
+    df.to_csv(out_dir / f"{artifact_stem}.csv", index=False)
 
     logger.info(f"Hamiltonian sweep done. Best: J*={best_J} h*={best_h} "
                 f"val_rmse={best_rmse:.4f}")
-    with open(out_dir / "best_hamiltonian.json", "w") as f:
+    with open(out_dir / f"best_{artifact_stem}.json", "w") as f:
         json.dump({"J_star": best_J, "h_star": best_h,
                    "val_rmse": best_rmse, "n_qubits": n_qubits,
                    "use_data_reuploading": use_data_reuploading,
                    "n_train_calibration": len(X_train),
                    "n_val_calibration": len(X_val)}, f, indent=2)
     return best_J, best_h, df
+
+
+def select_qrc_architecture(X_train: np.ndarray, y_train: np.ndarray,
+                            X_val: np.ndarray, y_val: np.ndarray,
+                            n_qubits: int = 9, horizon: int = None,
+                            topology: str = "chain", out_dir: Path = None) -> dict:
+    """Paired encoding and Hamiltonian selection on one fixed calibration set.
+
+    Standard and data-reuploading circuits receive the identical chronological
+    train/validation prefixes, J-h grid, qubit count, topology, warmup, and
+    ridge-lambda selection. The selected architecture is written per horizon
+    and is the only architecture promoted to that horizon's downstream QRC.
+    """
+    out_dir = out_dir or RESULTS
+    out_dir.mkdir(parents=True, exist_ok=True)
+    label = f"h{horizon}" if horizon is not None else "primary"
+    frames, candidates = [], []
+    for use_reuploading in ENCODING_OPTIONS:
+        encoding = "data_reuploading" if use_reuploading else "standard"
+        stem = f"hamiltonian_sweep_{label}_{encoding}"
+        J, h, df = hamiltonian_sweep(
+            X_train, y_train, X_val, y_val, n_qubits=n_qubits,
+            topology=topology, use_data_reuploading=use_reuploading,
+            out_dir=out_dir, artifact_stem=stem,
+        )
+        best = df.loc[df["val_rmse"].idxmin()].to_dict()
+        best.update(encoding=encoding, use_data_reuploading=use_reuploading)
+        candidates.append(best)
+        frames.append(df.assign(encoding=encoding, horizon_hours=horizon))
+
+    comparison = pd.concat(frames, ignore_index=True)
+    comparison.to_csv(out_dir / f"encoding_hamiltonian_comparison_{label}.csv", index=False)
+    # ENCODING_OPTIONS lists standard first, deliberately resolving exact
+    # numerical ties in favour of the shallower circuit.
+    selected = min(candidates, key=lambda row: row["val_rmse"])
+    selected.update(
+        horizon_hours=horizon, n_qubits=n_qubits, topology=topology,
+        random_seed=RANDOM_SEED,
+        selection_metric="mean validation RMSE after per-candidate ridge-lambda selection",
+        n_train_calibration=int(selected["n_train"]),
+        n_val_calibration=int(selected["n_val"]),
+    )
+    with open(out_dir / f"best_qrc_architecture_{label}.json", "w") as f:
+        json.dump(selected, f, indent=2,
+                  default=lambda value: value.item() if hasattr(value, "item") else value)
+    logger.info("Architecture selection (%s): encoding=%s J*=%.3g h*=%.3g "
+                "lambda*=%.3g val_rmse=%.4f", label, selected["encoding"],
+                selected["J"], selected["h"], selected["ridge_lambda"],
+                selected["val_rmse"])
+    return selected
 
 
 # ── 2. Noise rate sweep ────────────────────────────────────────────────────────

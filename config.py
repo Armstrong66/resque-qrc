@@ -57,7 +57,11 @@ QRC_WARMUP       = 20
 QUBIT_COUNTS    = [5, 7, 9, 12, 16, 20]
 QUBIT_PRIMARY   = 9             # Primary reported result (matches Hou et al. 2026)
 
+# The primary pipeline selects standard versus data-reuploading encoding on
+# validation data for each horizon. This value remains the default for direct
+# IsingQRC construction and standalone experiments.
 USE_DATA_REUPLOADING = True
+ENCODING_OPTIONS = [False, True]   # evaluated in this order; standard wins exact ties
 
 # Hamiltonian: transverse-field Ising  H = -J ΣZᵢZⱼ - h ΣXᵢ
 J_SWEEP  = [0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]

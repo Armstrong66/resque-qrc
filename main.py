@@ -57,6 +57,23 @@ def _load_sweep_results(out_dir: Path) -> tuple:
     return J, h, p, topology
 
 
+def _load_horizon_architecture(out_dir: Path, horizon: int) -> dict:
+    """Load the paired encoding/Hamiltonian winner for one forecast horizon."""
+    path = out_dir / f"best_qrc_architecture_h{horizon}.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No per-horizon architecture selection at {path}. Re-run without "
+            "--skip_sweeps so both encodings are compared on identical calibration data."
+        )
+    with open(path) as f:
+        architecture = json.load(f)
+    required = {"J", "h", "use_data_reuploading", "topology"}
+    missing = required.difference(architecture)
+    if missing:
+        raise ValueError(f"Architecture file {path} is missing: {sorted(missing)}")
+    return architecture
+
+
 def _warn_if_stale_reuploading(filename: str, cached: dict):
     """
     Cached sweep JSON records the encoding it was produced under. J*/h*/p*
@@ -128,13 +145,16 @@ def _resolve_warm_start_states(fitted_esn, fitted_rnn: dict, X_train):
                      f"expected 'esn', 'lstm', or 'gru'.")
 
 
-def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
+def _train_horizon(h_val, ds, args, architecture, p_star):
     from baselines.classical import run_persistence, run_arima, run_esn, run_rnn
     from reservoir.quantum_reservoir import IsingQRC
     from readout.ridge_readout import RidgeReadout
 
     logger.info(f"\n{'-'*70}")
     logger.info(f"Horizon {h_val}h — {ds.summary()}")
+    logger.info("Selected QRC architecture: encoding=%s J=%s h=%s topology=%s",
+                "data_reuploading" if architecture["use_data_reuploading"] else "standard",
+                architecture["J"], architecture["h"], architecture["topology"])
     logger.info(f"{'-'*70}")
 
     X_train, X_val, X_test, proj = _model_inputs(ds, args.n_qubits)
@@ -218,9 +238,9 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
         # Cold and warm starts differ only in the readout; sharing these
         # deterministic trajectories preserves results while avoiding a
         # duplicate full reservoir execution.
-        qrc = IsingQRC(n_qubits=args.n_qubits, J=J_star, h=h_star,
-                       noise_rate=p_star, topology=topology_star,
-                       use_data_reuploading=USE_DATA_REUPLOADING,
+        qrc = IsingQRC(n_qubits=args.n_qubits, J=architecture["J"], h=architecture["h"],
+                       noise_rate=p_star, topology=architecture["topology"],
+                       use_data_reuploading=architecture["use_data_reuploading"],
                        platform=args.platform)
         H_train = qrc.run_sequence(X_train, warmup=w, verbose=True)
         H_val = qrc.run_sequence(X_val, warmup=w, verbose=True)
@@ -248,7 +268,10 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
                 warm_start=use_warm and (X_warm is not None),
             )
             best = readout.fit(H_tr, y_tr, H_vl, y_vl, X_train_warm_start=X_warm)
-            readout.save_selection_log(RESULTS / f"h{h_val}")
+            readout.save_selection_log(
+                RESULTS / f"h{h_val}",
+                filename=f"{mode_label}_readout_selection.json",
+            )
 
             from baselines.classical import BaselineResult
             from evaluation.metrics import rmse_per_target
@@ -273,7 +296,8 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
             cfg = qrc.get_config()
             cfg.update(horizon_hours=h_val, readout_strategy=best.strategy,
                        warm_start=use_warm, warm_start_source=WARM_START_SOURCE,
-                       shared_pca=USE_SHARED_PCA)
+                       shared_pca=USE_SHARED_PCA,
+                       architecture_selection=architecture)
             with open(out_h / f"{mode_label}_config.json", "w") as f:
                 json.dump(cfg, f, indent=2)
         except Exception as e:
@@ -325,27 +349,43 @@ def run_pipeline(args):
     prep.save(datasets)
 
     RESULTS.mkdir(parents=True, exist_ok=True)
-    h_primary = horizons[0]
-    ds_primary = datasets[h_primary]
-    X_q_tr, X_q_vl, _, _ = _model_inputs(ds_primary, args.n_qubits)
-
     logger.info("\n[3/6] Parameter sweeps")
+    architectures = {}
+    h_primary = horizons[0]
     if args.skip_sweeps:
-        J_star, h_star, p_star, topology_star = _load_sweep_results(RESULTS)
+        for h_val in horizons:
+            architectures[h_val] = _load_horizon_architecture(RESULTS, h_val)
+        _, _, p_star, _ = _load_sweep_results(RESULTS)
     else:
-        from experiments.sweeps import (hamiltonian_sweep, noise_sweep,
-                                         qubit_scaling_study, shot_ablation,
-                                         topology_comparison)
-        J_star, h_star, p_star, topology_star = J_DEFAULT, H_DEFAULT, 0.0, TOPOLOGY_PRIMARY
-        try:
-            J_star, h_star, _ = hamiltonian_sweep(
-                X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val, n_qubits=args.n_qubits)
-        except Exception as e:
-            logger.error(f"Hamiltonian sweep failed: {e}")
+        from experiments.sweeps import (select_qrc_architecture, noise_sweep,
+                                         qubit_scaling_study, shot_ablation)
+        for h_val in horizons:
+            ds = datasets[h_val]
+            X_q_tr, X_q_vl, _, _ = _model_inputs(ds, args.n_qubits)
+            try:
+                architectures[h_val] = select_qrc_architecture(
+                    X_q_tr, ds.y_train, X_q_vl, ds.y_val,
+                    n_qubits=args.n_qubits, horizon=h_val,
+                    topology=TOPOLOGY_PRIMARY, out_dir=RESULTS,
+                )
+            except Exception as e:
+                logger.error(f"Architecture selection failed for {h_val}h: {e}")
+                architectures[h_val] = {
+                    "J": J_DEFAULT, "h": H_DEFAULT,
+                    "use_data_reuploading": USE_DATA_REUPLOADING,
+                    "topology": TOPOLOGY_PRIMARY,
+                }
+
+        ds_primary = datasets[h_primary]
+        X_q_tr, X_q_vl, _, _ = _model_inputs(ds_primary, args.n_qubits)
+        primary_architecture = architectures[h_primary]
+        p_star = 0.0
         try:
             p_star, _ = noise_sweep(
                 X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val,
-                J=J_star, h=h_star, n_qubits=args.n_qubits)
+                J=primary_architecture["J"], h=primary_architecture["h"],
+                n_qubits=args.n_qubits,
+                use_data_reuploading=primary_architecture["use_data_reuploading"])
         except Exception as e:
             logger.error(f"Noise sweep failed: {e}")
         p_primary = p_star if (args.use_selected_noise or USE_SELECTED_NOISE_FOR_PRIMARY) else 0.0
@@ -355,31 +395,32 @@ def run_pipeline(args):
                         "Pass --use_selected_noise for the separate noisy protocol.", p_star)
         try:
             qubit_scaling_study(X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val,
-                                J=J_star, h=h_star, p=p_primary)
+                                J=primary_architecture["J"], h=primary_architecture["h"], p=p_primary,
+                                use_data_reuploading=primary_architecture["use_data_reuploading"])
         except Exception as e:
             logger.error(f"Qubit scaling failed: {e}")
         try:
             shot_ablation(X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val,
-                          J=J_star, h=h_star, p=p_primary, n_qubits=args.n_qubits)
+                          J=primary_architecture["J"], h=primary_architecture["h"], p=p_primary,
+                          n_qubits=args.n_qubits,
+                          use_data_reuploading=primary_architecture["use_data_reuploading"])
         except Exception as e:
             logger.error(f"Shot ablation failed: {e}")
-        try:
-            topology_star, _ = topology_comparison(
-                X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val,
-                J=J_star, h=h_star, n_qubits=args.n_qubits)
-        except Exception as e:
-            logger.error(f"Topology comparison failed: {e}")
 
     p_primary = p_star if (args.use_selected_noise or USE_SELECTED_NOISE_FOR_PRIMARY) else 0.0
-    logger.info(f"Sweep: J*={J_star} h*={h_star} p*_calibration={p_star} "
-                f"p_primary={p_primary} topo={topology_star}")
+    for h_val, architecture in architectures.items():
+        logger.info("Architecture h=%sh: encoding=%s J*=%s h*=%s topology=%s; "
+                    "p*_calibration=%s p_primary=%s", h_val,
+                    "data_reuploading" if architecture["use_data_reuploading"] else "standard",
+                    architecture["J"], architecture["h"], architecture["topology"],
+                    p_star, p_primary)
 
     logger.info("\n[4-6/6] Per-horizon train and evaluate")
     for h_val in horizons:
         ds = datasets[h_val]
         try:
             all_results, _ = _train_horizon(
-                h_val, ds, args, J_star, h_star, p_primary, topology_star)
+                h_val, ds, args, architectures[h_val], p_primary)
             build_results_table(
                 results=all_results,
                 y_true_val=ds.y_val,
