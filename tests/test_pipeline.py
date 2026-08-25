@@ -12,6 +12,7 @@ from data.parser import _clean_resampled
 from preprocessing.pipeline import WeatherPreprocessor
 from preprocessing.projection import fit_pca_projector, project_splits
 from evaluation.metrics import valid_prediction_time, rmse_per_target
+from experiments.sweeps import _subsample_sweep_data
 
 
 def test_clean_resampled_drops_nan_rows():
@@ -62,3 +63,19 @@ def test_label_offset_alignment():
     pred = y_true[5:].copy()
     rmse = rmse_per_target(y_true[5:], pred)
     assert rmse.shape == (1,)
+
+
+def test_sweep_calibration_subsets_preserve_temporal_order_and_alignment():
+    X_train = np.arange(40, dtype=np.float32).reshape(10, 4)
+    y_train = np.arange(20, dtype=np.float32).reshape(10, 2)
+    X_val = np.arange(32, dtype=np.float32).reshape(8, 4)
+    y_val = np.arange(16, dtype=np.float32).reshape(8, 2)
+    X_tr_s, y_tr_s, X_vl_s, y_vl_s = _subsample_sweep_data(
+        X_train, y_train, X_val, y_val, max_train=6, max_val=5)
+
+    assert X_tr_s.shape == (6, 4)
+    assert y_tr_s.shape == (6, 2)
+    assert X_vl_s.shape == (5, 4)
+    assert y_vl_s.shape == (5, 2)
+    np.testing.assert_array_equal(X_tr_s, X_train[:6])
+    np.testing.assert_array_equal(y_vl_s, y_val[:5])

@@ -87,13 +87,22 @@ NOISE_TYPE       = "depolarizing"   # Applied via PennyLane noise model
 # Finite-shot ablation (set to None for exact / infinite shots in simulation)
 SHOT_COUNTS      = [None, 500, 1000, 5000]
 
-# Sweeps: cap train samples for Hamiltonian grid (None = use all)
+# Calibration sweeps use fixed contiguous chronological prefixes. This keeps
+# reservoir dynamics intact and gives every configuration identical inputs.
+# Final reported forecasts still use complete chronological splits.
 SWEEP_MAX_TRAIN_SAMPLES = 800
+SWEEP_MAX_VAL_SAMPLES   = 200
 
 # Noise sweep: use fewer steps because default.mixed (density matrix) is slower
 # than default.qubit (state vector). 50 is enough to select p*; full convergence
 # is not required for noise-rate selection.
-NOISE_SWEEP_MAX_SAMPLES = 50
+NOISE_SWEEP_MAX_SAMPLES     = 50
+NOISE_SWEEP_MAX_VAL_SAMPLES = 50
+
+# A density-matrix noise sweep is a robustness ablation, not a free primary
+# benchmark hyperparameter. Keeping this False prevents a pilot p* from being
+# silently propagated into computationally prohibitive scaling/final runs.
+USE_SELECTED_NOISE_FOR_PRIMARY = False
 
 # Real-hardware validation (scripts/hardware_validation.py): deliberately
 # small — the sweeps above already selected J*/h*/p*/topology*/n_qubits on

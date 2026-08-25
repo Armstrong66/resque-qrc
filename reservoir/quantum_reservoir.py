@@ -367,8 +367,8 @@ class IsingQRC:
                 prev_zexp = state[:self.n_qubits]
             if t >= warmup:
                 states.append(state)
-            if verbose and t % 100 == 0:
-                logger.debug(f"  Reservoir step {t}/{T}")
+            if verbose and (t == 0 or (t + 1) % 100 == 0 or t + 1 == T):
+                logger.info(f"  Reservoir progress: {t + 1}/{T} steps")
 
         result = np.array(states, dtype=np.float32)
         logger.debug(f"run_sequence: {X_seq.shape} → {result.shape}")

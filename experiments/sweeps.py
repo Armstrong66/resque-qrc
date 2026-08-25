@@ -12,6 +12,7 @@ Logs all decisions for reproducibility and qBraid Skill compatibility.
 
 import sys
 import json
+import time
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -20,7 +21,8 @@ from itertools import product
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (J_SWEEP, H_SWEEP, NOISE_RATES, QUBIT_COUNTS,
                     SHOT_COUNTS, TOPOLOGIES, RESULTS, RANDOM_SEED, QRC_WARMUP,
-                    SWEEP_MAX_TRAIN_SAMPLES, NOISE_SWEEP_MAX_SAMPLES,
+                    SWEEP_MAX_TRAIN_SAMPLES, SWEEP_MAX_VAL_SAMPLES,
+                    NOISE_SWEEP_MAX_SAMPLES, NOISE_SWEEP_MAX_VAL_SAMPLES,
                     USE_DATA_REUPLOADING)
 from utils import get_logger
 
@@ -32,14 +34,20 @@ def _qrc_warmup(n_samples: int) -> int:
     return min(QRC_WARMUP, max(0, n_samples // 10))
 
 
-def _subsample_sweep_data(X_train, y_train, X_val, y_val, max_n: int = None):
-    """Use a fixed prefix of train/val for faster sweeps (temporal order preserved)."""
-    if max_n is None:
-        max_n = SWEEP_MAX_TRAIN_SAMPLES
-    if max_n is None or len(X_train) <= max_n:
-        return X_train, y_train, X_val, y_val
-    logger.info(f"Sweep subsample: using first {max_n}/{len(X_train)} train windows")
-    return X_train[:max_n], y_train[:max_n], X_val, y_val
+def _subsample_sweep_data(X_train, y_train, X_val, y_val,
+                          max_train: int = None, max_val: int = None):
+    """Return fixed contiguous chronological prefixes for calibration sweeps.
+
+    Random row sampling would alter a reservoir's state dynamics. Every
+    candidate instead receives the same ordered train/validation sequences.
+    """
+    max_train = SWEEP_MAX_TRAIN_SAMPLES if max_train is None else max_train
+    max_val = SWEEP_MAX_VAL_SAMPLES if max_val is None else max_val
+    n_train = min(len(X_train), max_train) if max_train is not None else len(X_train)
+    n_val = min(len(X_val), max_val) if max_val is not None else len(X_val)
+    logger.info("Sweep calibration subset: first %d/%d train and %d/%d validation windows",
+                n_train, len(X_train), n_val, len(X_val))
+    return X_train[:n_train], y_train[:n_train], X_val[:n_val], y_val[:n_val]
 
 
 def _quick_eval(qrc, X_train, y_train, X_val, y_val, lambda_=1e-3):
@@ -101,10 +109,14 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
     best_J, best_h = J_SWEEP[0], H_SWEEP[0]
 
     for J, h in product(J_SWEEP, H_SWEEP):
+        t0 = time.perf_counter()
         qrc = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topology, noise_rate=0.0,
                        use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
-        rows.append({"J": J, "h": h, "val_rmse": rmse})
+        rows.append({"J": J, "h": h, "val_rmse": rmse,
+                     "n_train": len(X_train), "n_val": len(X_val)})
+        logger.info("  Hamiltonian config J=%.2f h=%.2f completed in %.1fs",
+                    J, h, time.perf_counter() - t0)
         logger.debug(f"  J={J:.2f} h={h:.2f} → val_rmse={rmse:.4f}")
 
         if rmse < best_rmse:
@@ -119,7 +131,9 @@ def hamiltonian_sweep(X_train: np.ndarray, y_train: np.ndarray,
     with open(out_dir / "best_hamiltonian.json", "w") as f:
         json.dump({"J_star": best_J, "h_star": best_h,
                    "val_rmse": best_rmse, "n_qubits": n_qubits,
-                   "use_data_reuploading": use_data_reuploading}, f, indent=2)
+                   "use_data_reuploading": use_data_reuploading,
+                   "n_train_calibration": len(X_train),
+                   "n_val_calibration": len(X_val)}, f, indent=2)
     return best_J, best_h, df
 
 
@@ -132,8 +146,9 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
                 use_data_reuploading: bool = None,
                 out_dir: Path = None) -> tuple[float, pd.DataFrame]:
     """
-    Sweep depolarizing noise rates. Returns (p*, results_df).
-    Tests hypothesis: optimal p* > 0 (noise-assisted generalization).
+    Sweep depolarizing noise rates on the fixed calibration subset.
+    Returns a screening p* for the noise-robustness ablation; it is not
+    silently promoted to the primary noiseless forecasting protocol.
     """
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
@@ -144,7 +159,8 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
     # Use fewer samples for noise sweep because default.mixed (density matrix)
     # is O(4ⁿ) vs default.qubit's O(2ⁿ) — 50 steps is enough for p* selection
     X_train, y_train, X_val, y_val = _subsample_sweep_data(
-        X_train, y_train, X_val, y_val, max_n=NOISE_SWEEP_MAX_SAMPLES
+        X_train, y_train, X_val, y_val,
+        max_train=NOISE_SWEEP_MAX_SAMPLES, max_val=NOISE_SWEEP_MAX_VAL_SAMPLES
     )
 
     logger.info(f"=== Noise sweep: {len(NOISE_RATES)} rates, "
@@ -155,10 +171,13 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
     best_p    = 0.0
 
     for p in NOISE_RATES:
+        t0 = time.perf_counter()
         qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, noise_rate=p,
                         use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
-        rows.append({"noise_rate": p, "val_rmse": rmse})
+        rows.append({"noise_rate": p, "val_rmse": rmse,
+                     "n_train": len(X_train), "n_val": len(X_val)})
+        logger.info("  Noise config p=%.4f completed in %.1fs", p, time.perf_counter() - t0)
         logger.info(f"  p={p:.4f} → val_rmse={rmse:.4f}")
 
         if rmse < best_rmse:
@@ -169,15 +188,17 @@ def noise_sweep(X_train: np.ndarray, y_train: np.ndarray,
     df.to_csv(out_dir / "noise_sweep.csv", index=False)
 
     if best_p > 0:
-        logger.info(f"✓ Noise-assisted: optimal p*={best_p} outperforms noiseless "
+        logger.info(f"Noise calibration screen: p*={best_p} beats noiseless "
                     f"(p=0 rmse={df[df.noise_rate==0.0].val_rmse.values[0]:.4f} "
                     f"vs p*={best_p} rmse={best_rmse:.4f})")
     else:
-        logger.info(f"Noiseless is optimal (p*=0). No noise-assisted benefit observed.")
+        logger.info(f"Noise calibration screen selected p*=0. No screened noise benefit observed.")
 
     with open(out_dir / "best_noise.json", "w") as f:
         json.dump({"p_star": best_p, "val_rmse": best_rmse,
-                   "use_data_reuploading": use_data_reuploading}, f, indent=2)
+                   "use_data_reuploading": use_data_reuploading,
+                   "n_train_calibration": len(X_train),
+                   "n_val_calibration": len(X_val)}, f, indent=2)
     return best_p, df
 
 
@@ -200,6 +221,7 @@ def qubit_scaling_study(X_train: np.ndarray, y_train: np.ndarray,
     out_dir.mkdir(parents=True, exist_ok=True)
     use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
                             else use_data_reuploading)
+    X_train, y_train, X_val, y_val = _subsample_sweep_data(X_train, y_train, X_val, y_val)
 
     logger.info(f"=== Qubit scaling study: n ∈ {qubit_counts} reuploading={use_data_reuploading} ===")
 
@@ -211,7 +233,8 @@ def qubit_scaling_study(X_train: np.ndarray, y_train: np.ndarray,
         feature_dim = 2 * n
         rows.append({"n_qubits": n, "feature_dim": feature_dim,
                      "val_rmse": rmse, "J": J, "h": h, "noise_rate": p,
-                     "use_data_reuploading": use_data_reuploading})
+                     "use_data_reuploading": use_data_reuploading,
+                     "n_train": len(X_train), "n_val": len(X_val)})
         logger.info(f"  n={n:2d} features={feature_dim:3d} → val_rmse={rmse:.4f}")
 
     df = pd.DataFrame(rows)
@@ -237,6 +260,7 @@ def shot_ablation(X_train: np.ndarray, y_train: np.ndarray,
     out_dir.mkdir(parents=True, exist_ok=True)
     use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
                             else use_data_reuploading)
+    X_train, y_train, X_val, y_val = _subsample_sweep_data(X_train, y_train, X_val, y_val)
 
     logger.info(f"=== Shot ablation: budgets={SHOT_COUNTS} noise_rate={p} "
                 f"reuploading={use_data_reuploading} ===")
@@ -247,7 +271,8 @@ def shot_ablation(X_train: np.ndarray, y_train: np.ndarray,
                         use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
         label = "∞ (exact)" if shots is None else str(shots)
-        rows.append({"shots": label, "val_rmse": rmse})
+        rows.append({"shots": label, "val_rmse": rmse,
+                     "n_train": len(X_train), "n_val": len(X_val)})
         logger.info(f"  shots={label:<12} → val_rmse={rmse:.4f}")
 
     df = pd.DataFrame(rows)
@@ -268,6 +293,7 @@ def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
     out_dir.mkdir(parents=True, exist_ok=True)
     use_data_reuploading = (USE_DATA_REUPLOADING if use_data_reuploading is None
                             else use_data_reuploading)
+    X_train, y_train, X_val, y_val = _subsample_sweep_data(X_train, y_train, X_val, y_val)
 
     rows = []
     best_rmse = float("inf")
@@ -277,7 +303,8 @@ def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
         qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topo,
                         use_data_reuploading=use_data_reuploading)
         rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
-        rows.append({"topology": topo, "val_rmse": rmse})
+        rows.append({"topology": topo, "val_rmse": rmse,
+                     "n_train": len(X_train), "n_val": len(X_val)})
         logger.info(f"  topology={topo:<12} → val_rmse={rmse:.4f}")
         if rmse < best_rmse:
             best_rmse = rmse

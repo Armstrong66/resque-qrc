@@ -222,6 +222,9 @@ def run_arima(y_train: np.ndarray, y_val: np.ndarray, y_test: np.ndarray,
                 obs = y_val[i, t]
                 if not np.isnan(obs):
                     model.update([obs])
+                if (i + 1) % 250 == 0 or i + 1 == len(y_val):
+                    logger.info("  ARIMA[%s] validation progress: %d/%d",
+                                target_names[t], i + 1, len(y_val))
 
             # Walk-forward on test
             for i in range(len(y_test)):
@@ -230,6 +233,9 @@ def run_arima(y_train: np.ndarray, y_val: np.ndarray, y_test: np.ndarray,
                 obs = y_test[i, t]
                 if not np.isnan(obs):
                     model.update([obs])
+                if (i + 1) % 250 == 0 or i + 1 == len(y_test):
+                    logger.info("  ARIMA[%s] test progress: %d/%d",
+                                target_names[t], i + 1, len(y_test))
 
         except Exception as e:
             logger.error(f"  ARIMA failed for {target_names[t]}: {e}")
@@ -561,8 +567,9 @@ def run_rnn(X_train: np.ndarray, y_train: np.ndarray,
             logger.info(f"{model_type.upper()} early stop at epoch {epoch+1}")
             break
 
-        if (epoch + 1) % 10 == 0:
-            logger.debug(f"  Epoch {epoch+1}/{RNN_EPOCHS} val_loss={val_loss:.4f}")
+        if (epoch + 1) % 5 == 0:
+            logger.info(f"  {model_type.upper()} epoch {epoch+1}/{RNN_EPOCHS} "
+                        f"val_loss={val_loss:.4f}")
 
     model.load_state_dict(best_state)
     model.eval()

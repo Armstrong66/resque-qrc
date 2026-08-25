@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import (TARGETS, HORIZONS, QUBIT_PRIMARY, J_DEFAULT, H_DEFAULT,
                     TOPOLOGY_PRIMARY, RESULTS, WINDOW_SIZE,
                     USE_SHARED_PCA, ESN_WARMUP, QRC_WARMUP, WARM_START_SOURCE,
-                    USE_DATA_REUPLOADING)
+                    USE_DATA_REUPLOADING, USE_SELECTED_NOISE_FOR_PRIMARY)
 from utils import get_logger
 
 logger = get_logger("main")
@@ -30,6 +30,9 @@ def parse_args():
     p.add_argument("--n_qubits", type=int, default=QUBIT_PRIMARY)
     p.add_argument("--skip_sweeps", action="store_true")
     p.add_argument("--skip_baselines", action="store_true")
+    p.add_argument("--use_selected_noise", action="store_true",
+                   help="Apply calibrated p* to scaling and final QRC runs. "
+                        "By default noise remains a separate robustness ablation.")
     p.add_argument("--force_rebuild_data", action="store_true")
     p.add_argument("--no_figures", action="store_true",
                    help="Skip generating plots after run")
@@ -211,22 +214,28 @@ def _train_horizon(h_val, ds, args, J_star, h_star, p_star, topology_star):
 
     w = _qrc_warmup(len(X_train))
 
-    for mode_label, use_warm in [("cold_start_qrc", False), ("warm_start_qrc", True)]:
-        logger.info(f"  QRC {mode_label} (h={h_val}h)")
-        try:
-            qrc = IsingQRC(
-                n_qubits=args.n_qubits, J=J_star, h=h_star,
-                noise_rate=p_star, topology=topology_star,
-                use_data_reuploading=USE_DATA_REUPLOADING,
-                platform=args.platform,
-            )
-            H_train = qrc.run_sequence(X_train, warmup=w)
-            H_val = qrc.run_sequence(X_val, warmup=w)
-            H_test = qrc.run_sequence(X_test, warmup=w)
+    try:
+        # Cold and warm starts differ only in the readout; sharing these
+        # deterministic trajectories preserves results while avoiding a
+        # duplicate full reservoir execution.
+        qrc = IsingQRC(n_qubits=args.n_qubits, J=J_star, h=h_star,
+                       noise_rate=p_star, topology=topology_star,
+                       use_data_reuploading=USE_DATA_REUPLOADING,
+                       platform=args.platform)
+        H_train = qrc.run_sequence(X_train, warmup=w, verbose=True)
+        H_val = qrc.run_sequence(X_val, warmup=w, verbose=True)
+        H_test = qrc.run_sequence(X_test, warmup=w, verbose=True)
+        H_tr_base, y_tr_base = _align_after_warmup(H_train, y_train, w)
+        H_vl, y_vl = _align_after_warmup(H_val, y_val, w)
+        H_ts, y_ts = _align_after_warmup(H_test, y_test, w)
+    except Exception as e:
+        logger.error(f"QRC trajectory generation failed: {e}\n{traceback.format_exc()}")
+        return all_results, w
 
-            H_tr, y_tr = _align_after_warmup(H_train, y_train, w)
-            H_vl, y_vl = _align_after_warmup(H_val, y_val, w)
-            H_ts, y_ts = _align_after_warmup(H_test, y_test, w)
+    for mode_label, use_warm in [("cold_start_qrc", False), ("warm_start_qrc", True)]:
+        logger.info(f"  QRC {mode_label} readout (h={h_val}h; shared trajectories)")
+        try:
+            H_tr, y_tr = H_tr_base.copy(), y_tr_base.copy()
 
             X_warm = None
             if use_warm and X_train_warm is not None:
@@ -339,14 +348,19 @@ def run_pipeline(args):
                 J=J_star, h=h_star, n_qubits=args.n_qubits)
         except Exception as e:
             logger.error(f"Noise sweep failed: {e}")
+        p_primary = p_star if (args.use_selected_noise or USE_SELECTED_NOISE_FOR_PRIMARY) else 0.0
+        if p_primary != p_star:
+            logger.info("Recorded calibrated p*=%.4f as a noise-robustness ablation; "
+                        "using p=0.0 for scaling and primary forecasts. "
+                        "Pass --use_selected_noise for the separate noisy protocol.", p_star)
         try:
             qubit_scaling_study(X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val,
-                                J=J_star, h=h_star, p=p_star)
+                                J=J_star, h=h_star, p=p_primary)
         except Exception as e:
             logger.error(f"Qubit scaling failed: {e}")
         try:
             shot_ablation(X_q_tr, ds_primary.y_train, X_q_vl, ds_primary.y_val,
-                          J=J_star, h=h_star, p=p_star, n_qubits=args.n_qubits)
+                          J=J_star, h=h_star, p=p_primary, n_qubits=args.n_qubits)
         except Exception as e:
             logger.error(f"Shot ablation failed: {e}")
         try:
@@ -356,14 +370,16 @@ def run_pipeline(args):
         except Exception as e:
             logger.error(f"Topology comparison failed: {e}")
 
-    logger.info(f"Sweep: J*={J_star} h*={h_star} p*={p_star} topo={topology_star}")
+    p_primary = p_star if (args.use_selected_noise or USE_SELECTED_NOISE_FOR_PRIMARY) else 0.0
+    logger.info(f"Sweep: J*={J_star} h*={h_star} p*_calibration={p_star} "
+                f"p_primary={p_primary} topo={topology_star}")
 
     logger.info("\n[4-6/6] Per-horizon train and evaluate")
     for h_val in horizons:
         ds = datasets[h_val]
         try:
             all_results, _ = _train_horizon(
-                h_val, ds, args, J_star, h_star, p_star, topology_star)
+                h_val, ds, args, J_star, h_star, p_primary, topology_star)
             build_results_table(
                 results=all_results,
                 y_true_val=ds.y_val,
