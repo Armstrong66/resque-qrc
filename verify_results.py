@@ -57,6 +57,9 @@ def _expected_files(horizons: list) -> dict:
         )
         files[f"results_h{h}.csv"] = RESULTS / f"results_h{h}.csv"
         files[f"h{h}/baseline_status.json"] = out_h / "baseline_status.json"
+        files[f"h{h}/warm_start_source_ablation.json"] = (
+            out_h / "warm_start_source_ablation.json"
+        )
         for mode in ("cold_start_qrc", "warm_start_qrc"):
             files[f"h{h}/{mode}_config.json"] = out_h / f"{mode}_config.json"
             files[f"h{h}/{mode}_readout.pkl"] = out_h / f"{mode}_readout.pkl"

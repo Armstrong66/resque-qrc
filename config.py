@@ -168,6 +168,7 @@ MULTIOUTPUT_MODES = ["joint", "independent", "ensemble"]
 #             a ridge readout. Selecting it raises a clear ValueError.
 USE_WARM_START     = True
 WARM_START_SOURCE  = "esn"      # "esn" | "lstm" | "gru"
+WARM_START_SOURCES = ["esn", "lstm", "gru"]  # hybrid-QRC ablation order; ties keep ESN
 ESN_HIDDEN_DIM     = 128        # Matched to QRC feature dimension (2 * n_qubits)
 
 # ── Classical baselines ───────────────────────────────────────────────────────

@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import (TARGETS, HORIZONS, QUBIT_PRIMARY, J_DEFAULT, H_DEFAULT,
                     TOPOLOGY_PRIMARY, RESULTS, WINDOW_SIZE,
                     USE_SHARED_PCA, ESN_WARMUP, QRC_WARMUP, WARM_START_SOURCE,
-                    USE_DATA_REUPLOADING, USE_SELECTED_NOISE_FOR_PRIMARY)
+                    WARM_START_SOURCES, USE_DATA_REUPLOADING,
+                    USE_SELECTED_NOISE_FOR_PRIMARY)
 from utils import get_logger
 
 logger = get_logger("main")
@@ -145,6 +146,61 @@ def _resolve_warm_start_states(fitted_esn, fitted_rnn: dict, X_train):
                      f"expected 'esn', 'lstm', or 'gru'.")
 
 
+def _available_warm_start_states(fitted_esn, fitted_rnn: dict, X_train) -> dict:
+    """Return available source-state matrices in deterministic ablation order."""
+    sources = {}
+    for source in WARM_START_SOURCES:
+        if source == "esn" and fitted_esn is not None:
+            sources[source] = fitted_esn.get_reservoir_states(X_train)
+        elif source in ("lstm", "gru") and fitted_rnn.get(source) is not None:
+            sources[source] = fitted_rnn[source].get_hidden_states(X_train)
+        else:
+            logger.warning("Warm-start ablation: %s unavailable; excluding it", source)
+    return sources
+
+
+def _select_warm_start_source(H_train, y_train, H_val, y_val,
+                              source_states: dict, target_names: list,
+                              out_dir: Path) -> tuple:
+    """Select a classical source by the final hybrid QRC validation score.
+
+    Standalone baseline RMSE is intentionally not used as the selector: each
+    source is transferred into QRC feature space, then judged on the resulting
+    hybrid's validation RMSE. This avoids assuming that a stronger forecaster
+    supplies a stronger transfer prior.
+    """
+    from readout.ridge_readout import RidgeReadout
+
+    candidates, fitted = [], {}
+    for source, X_warm in source_states.items():
+        n_align = min(len(H_train), len(y_train), len(X_warm))
+        H_fit, y_fit, X_fit = H_train[-n_align:], y_train[-n_align:], X_warm[-n_align:]
+        readout = RidgeReadout(target_names=target_names, warm_start=True)
+        best = readout.fit(H_fit, y_fit, H_val, y_val, X_train_warm_start=X_fit)
+        readout.save_selection_log(out_dir, filename=f"warm_start_{source}_readout_selection.json")
+        fitted[source] = (readout, best)
+        candidates.append({
+            "source": source,
+            "val_rmse_mean": best.val_rmse_mean,
+            "val_rmse_per_target": {name: float(value) for name, value in
+                                    zip(target_names, best.val_rmse)},
+            "readout_strategy": best.strategy,
+            "ridge_lambda": best.lambda_,
+            "n_aligned_train": n_align,
+        })
+
+    if not candidates:
+        return None, None, []
+    # WARM_START_SOURCES establishes deterministic tie-breaking.
+    selected = min(candidates, key=lambda candidate: candidate["val_rmse_mean"])
+    with open(out_dir / "warm_start_source_ablation.json", "w") as f:
+        json.dump({"selection_metric": "hybrid QRC mean validation RMSE",
+                   "candidates": candidates, "selected_source": selected["source"]}, f, indent=2)
+    logger.info("Warm-start-source selection: %s (hybrid val_rmse=%.4f)",
+                selected["source"], selected["val_rmse_mean"])
+    return selected["source"], fitted[selected["source"]], candidates
+
+
 def _train_horizon(h_val, ds, args, architecture, p_star):
     from baselines.classical import run_persistence, run_arima, run_esn, run_rnn
     from reservoir.quantum_reservoir import IsingQRC
@@ -230,7 +286,7 @@ def _train_horizon(h_val, ds, args, architecture, p_star):
         logger.warning(f"Baselines NOT in results_h{h_val}.csv: {missing} "
                        f"(see {out_h / 'baseline_status.json'} for reasons)")
 
-    X_train_warm = _resolve_warm_start_states(fitted_esn, fitted_rnn, X_train)
+    source_states = _available_warm_start_states(fitted_esn, fitted_rnn, X_train)
 
     w = _qrc_warmup(len(X_train))
 
@@ -252,22 +308,22 @@ def _train_horizon(h_val, ds, args, architecture, p_star):
         logger.error(f"QRC trajectory generation failed: {e}\n{traceback.format_exc()}")
         return all_results, w
 
+    selected_warm_source, selected_warm_fit, _ = _select_warm_start_source(
+        H_tr_base, y_tr_base, H_vl, y_vl, source_states, TARGETS, out_h
+    )
+
     for mode_label, use_warm in [("cold_start_qrc", False), ("warm_start_qrc", True)]:
         logger.info(f"  QRC {mode_label} readout (h={h_val}h; shared trajectories)")
         try:
-            H_tr, y_tr = H_tr_base.copy(), y_tr_base.copy()
-
-            X_warm = None
-            if use_warm and X_train_warm is not None:
-                n_align = min(len(H_tr), len(X_train_warm))
-                H_tr, y_tr = H_tr[-n_align:], y_tr[-n_align:]
-                X_warm = X_train_warm[-n_align:]
-
-            readout = RidgeReadout(
-                target_names=TARGETS,
-                warm_start=use_warm and (X_warm is not None),
-            )
-            best = readout.fit(H_tr, y_tr, H_vl, y_vl, X_train_warm_start=X_warm)
+            if use_warm:
+                if selected_warm_fit is None:
+                    logger.warning("No fitted classical hidden-state source is available; "
+                                   "warm-start QRC is skipped for h=%sh", h_val)
+                    continue
+                readout, best = selected_warm_fit
+            else:
+                readout = RidgeReadout(target_names=TARGETS, warm_start=False)
+                best = readout.fit(H_tr_base, y_tr_base, H_vl, y_vl)
             readout.save_selection_log(
                 RESULTS / f"h{h_val}",
                 filename=f"{mode_label}_readout_selection.json",
@@ -280,7 +336,8 @@ def _train_horizon(h_val, ds, args, architecture, p_star):
                 name=mode_label, y_pred_val=pred_val, y_pred_test=pred_test,
                 val_rmse=rmse_per_target(y_vl, pred_val),
                 test_rmse=rmse_per_target(y_ts, pred_test),
-                meta={"type": mode_label, "readout_strategy": best.strategy},
+                meta={"type": mode_label, "readout_strategy": best.strategy,
+                      "warm_start_source": selected_warm_source if use_warm else None},
                 label_offset=w,
             )
             all_results[mode_label] = qrc_result
@@ -295,7 +352,8 @@ def _train_horizon(h_val, ds, args, architecture, p_star):
             best.save(out_h / f"{mode_label}_readout.pkl")
             cfg = qrc.get_config()
             cfg.update(horizon_hours=h_val, readout_strategy=best.strategy,
-                       warm_start=use_warm, warm_start_source=WARM_START_SOURCE,
+                       warm_start=use_warm,
+                       warm_start_source=selected_warm_source if use_warm else None,
                        shared_pca=USE_SHARED_PCA,
                        architecture_selection=architecture)
             with open(out_h / f"{mode_label}_config.json", "w") as f:

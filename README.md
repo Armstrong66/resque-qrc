@@ -85,7 +85,7 @@ The QRC implements
 
 $$H = -J \sum_{\langle i,j \rangle} Z_i Z_j - h \sum_i X_i,$$
 
-using four Trotter steps per input sample. The reservoir state contains expectation values of both $Z$ and $X$ observables, producing $2n$ features for $n$ qubits. The readout selects the best validation RMSE among joint, independent, and ensemble ridge strategies. Cold-start and warm-start readouts share the same QRC trajectories; their selection records are written separately.
+using four Trotter steps per input sample. The reservoir state contains expectation values of both $Z$ and $X$ observables, producing $2n$ features for $n$ qubits. The readout selects the best validation RMSE among joint, independent, and ensemble ridge strategies. Cold-start and warm-start readouts share the same QRC trajectories. For the warm-start condition, ESN, LSTM, and GRU hidden-state sources are each transferred into the QRC readout and compared by the resulting hybrid validation RMSE; the best available source is selected independently for each horizon.
 
 The primary benchmark uses all available chronological examples in each split. Calibration and robustness experiments instead use a common contiguous prefix for every candidate, preserving reservoir dynamics while bounding cost: up to 800 training and 200 validation windows by default. The density-matrix noise screen uses 50 training and 50 validation windows. These counts are saved with sweep artifacts.
 
@@ -111,7 +111,8 @@ All settings are centralized in `config.py`.
 | `USE_DATA_REUPLOADING` | `True` | Default for standalone QRC construction |
 | `USE_FEEDBACK` | `True` | Feed prior $\langle Z\rangle$ into encoding |
 | `TROTTER_STEPS` | `4` | Trotter steps per input |
-| `WARM_START_SOURCE` | `"esn"` | `esn`, `lstm`, or `gru` source |
+| `WARM_START_SOURCES` | `["esn", "lstm", "gru"]` | Hybrid-QRC warm-start ablation candidates |
+| `WARM_START_SOURCE` | `"esn"` | Standalone/legacy default source |
 | `SWEEP_MAX_TRAIN_SAMPLES` | `800` | Standard calibration training budget |
 | `SWEEP_MAX_VAL_SAMPLES` | `200` | Standard calibration validation budget |
 | `USE_SELECTED_NOISE_FOR_PRIMARY` | `False` | Keep noise screen separate by default |
@@ -132,6 +133,7 @@ Generated artifacts are written below `outputs/`.
 | `outputs/results/hamiltonian_sweep_h{h}_{encoding}.csv` | Encoding-specific Hamiltonian grid for horizon `h` |
 | `outputs/results/encoding_hamiltonian_comparison_h{h}.csv` | Paired encoding--Hamiltonian comparison for horizon `h` |
 | `outputs/results/best_qrc_architecture_h{h}.json` | Horizon-specific selected encoding and Hamiltonian |
+| `outputs/results/h{h}/warm_start_source_ablation.json` | Hybrid-QRC validation comparison of ESN, LSTM, and GRU transfer sources |
 | `outputs/results/noise_sweep.csv` | Simulator noise-robustness results |
 | `outputs/results/qubit_scaling.csv` | Qubit-scaling results |
 | `outputs/results/shot_ablation.csv` | Finite-shot robustness results |
