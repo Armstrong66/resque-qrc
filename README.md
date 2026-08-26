@@ -87,6 +87,8 @@ $$H = -J \sum_{\langle i,j \rangle} Z_i Z_j - h \sum_i X_i,$$
 
 using four Trotter steps per input sample. The reservoir state contains expectation values of both $Z$ and $X$ observables, producing $2n$ features for $n$ qubits. The readout selects the best validation RMSE among joint, independent, and ensemble ridge strategies. Cold-start and warm-start readouts share the same QRC trajectories. For the warm-start condition, ESN, LSTM, and GRU hidden-state sources are each transferred into the QRC readout and compared by the resulting hybrid validation RMSE; the best available source is selected independently for each horizon.
 
+The warm transfer is a validation-selected MAP prior centred on the SVD-mapped classical readout, with a prior-strength grid independent of the ordinary ridge penalty. A selected prior strength of zero is recorded as a negative result (no source transfer promoted), not as evidence that initialization was beneficial.
+
 The primary benchmark uses all available chronological examples in each split. Calibration and robustness experiments instead use a common contiguous prefix for every candidate, preserving reservoir dynamics while bounding cost: up to 800 training and 200 validation windows by default. The density-matrix noise screen uses 50 training and 50 validation windows. These counts are saved with sweep artifacts.
 
 For each horizon, the primary architecture is selected by a paired standard-versus-data-reuploading Hamiltonian grid on identical calibration windows. The selected encoding and its re-optimized $J,h$ values are then used only for that horizon's downstream QRC evaluation. The default primary protocol is noiseless (`p = 0`). A selected depolarizing-noise value is treated as a simulator robustness result and is not silently propagated into the primary forecasts, scaling study, or shot ablation. To run the distinct noisy-QRC protocol explicitly:
@@ -94,6 +96,8 @@ For each horizon, the primary architecture is selected by a paired standard-vers
 ```bash
 python main.py --use_selected_noise
 ```
+
+Chain versus all-to-all connectivity is re-evaluated for each horizon at its selected encoding and Hamiltonian on the same calibration subset. This is reported as a conditional topology-sensitivity ablation; it does not silently create a second model-selection stage or replace the declared chain-constrained primary model.
 
 See [the methods draft](docs/METHODS_DRAFT.md) for the complete paper-oriented description of the data, model, baselines, and reporting boundaries.
 
@@ -133,6 +137,7 @@ Generated artifacts are written below `outputs/`.
 | `outputs/results/hamiltonian_sweep_h{h}_{encoding}.csv` | Encoding-specific Hamiltonian grid for horizon `h` |
 | `outputs/results/encoding_hamiltonian_comparison_h{h}.csv` | Paired encoding--Hamiltonian comparison for horizon `h` |
 | `outputs/results/best_qrc_architecture_h{h}.json` | Horizon-specific selected encoding and Hamiltonian |
+| `outputs/results/topology_comparison_h{h}.csv` | Conditional chain/all-to-all topology sensitivity at that selected architecture |
 | `outputs/results/h{h}/warm_start_source_ablation.json` | Hybrid-QRC validation comparison of ESN, LSTM, and GRU transfer sources |
 | `outputs/results/noise_sweep.csv` | Simulator noise-robustness results |
 | `outputs/results/qubit_scaling.csv` | Qubit-scaling results |
@@ -144,6 +149,8 @@ Readout logs are mode-specific: `cold_start_qrc_readout_selection.json` and `war
 ```bash
 python verify_results.py
 ```
+
+`current_run_manifest.json` identifies the authoritative artifacts from the most recent completed pipeline run. Legacy root-level sweep files and generic `h*/readout_selection.json` files are never authoritative for the paired per-horizon protocol.
 
 ## Hardware validation
 

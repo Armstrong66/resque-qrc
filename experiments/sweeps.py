@@ -351,8 +351,15 @@ def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
                           X_val: np.ndarray, y_val: np.ndarray,
                           J: float, h: float, n_qubits: int = 9,
                           use_data_reuploading: bool = None,
-                          out_dir: Path = None) -> tuple[str, pd.DataFrame]:
-    """Compare chain vs all-to-all topology. Returns (best_topology, df)."""
+                          out_dir: Path = None,
+                          artifact_stem: str = "topology_comparison",
+                          horizon: int = None) -> tuple[str, pd.DataFrame]:
+    """Compare chain and all-to-all under one fixed selected architecture.
+
+    This is a conditional robustness ablation: it does not retroactively alter
+    the primary chain-constrained architecture selection, whose topology is
+    chosen for a consistent hardware-compatible downstream pipeline.
+    """
     from reservoir.quantum_reservoir import IsingQRC
     out_dir = out_dir or RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -367,18 +374,27 @@ def topology_comparison(X_train: np.ndarray, y_train: np.ndarray,
     for topo in TOPOLOGIES:
         qrc  = IsingQRC(n_qubits=n_qubits, J=J, h=h, topology=topo,
                         use_data_reuploading=use_data_reuploading)
-        rmse = _quick_eval(qrc, X_train, y_train, X_val, y_val)
+        rmse, lambda_ = _quick_eval(qrc, X_train, y_train, X_val, y_val,
+                                    return_lambda=True)
         rows.append({"topology": topo, "val_rmse": rmse,
-                     "n_train": len(X_train), "n_val": len(X_val)})
+                     "ridge_lambda": lambda_, "n_train": len(X_train), "n_val": len(X_val),
+                     "J": J, "h": h, "n_qubits": n_qubits,
+                     "use_data_reuploading": use_data_reuploading,
+                     "horizon_hours": horizon,
+                     "selection_role": "conditional_ablation"})
         logger.info(f"  topology={topo:<12} → val_rmse={rmse:.4f}")
         if rmse < best_rmse:
             best_rmse = rmse
             best_topo = topo
 
     df = pd.DataFrame(rows)
-    df.to_csv(out_dir / "topology_comparison.csv", index=False)
-    with open(out_dir / "best_topology.json", "w") as f:
+    stem = Path(artifact_stem).stem
+    df.to_csv(out_dir / f"{stem}.csv", index=False)
+    with open(out_dir / f"{stem}_summary.json", "w") as f:
         json.dump({"topology_star": best_topo, "val_rmse": best_rmse,
-                   "use_data_reuploading": use_data_reuploading}, f, indent=2)
+                   "use_data_reuploading": use_data_reuploading,
+                   "horizon_hours": horizon, "J": J, "h": h,
+                   "n_qubits": n_qubits,
+                   "selection_role": "conditional_ablation_not_primary_selection"}, f, indent=2)
     logger.info(f"Topology sweep done. Best: {best_topo} (val_rmse={best_rmse:.4f})")
     return best_topo, df

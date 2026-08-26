@@ -20,6 +20,48 @@ from utils import get_logger
 logger = get_logger("main")
 
 
+def _write_run_manifest(horizons: list, architectures: dict,
+                        p_calibrated: float, p_primary: float) -> Path:
+    """Declare the authoritative artifacts from this completed pipeline run.
+
+    Older root-level sweep files and generic readout logs are intentionally not
+    listed: they may belong to a prior protocol and must not be used to
+    interpret this run.
+    """
+    artifacts = []
+    root_patterns = [
+        "best_qrc_architecture_h*.json", "encoding_hamiltonian_comparison_h*.csv",
+        "hamiltonian_sweep_h*.csv", "best_hamiltonian_sweep_h*.json",
+        "topology_comparison_h*.csv", "topology_comparison_h*_summary.json",
+        "noise_sweep.csv", "best_noise.json", "qubit_scaling.csv", "shot_ablation.csv",
+    ]
+    for pattern in root_patterns:
+        artifacts.extend(str(path.relative_to(RESULTS)) for path in RESULTS.glob(pattern))
+    for horizon in horizons:
+        out_h = RESULTS / f"h{horizon}"
+        for pattern in ("results_*.csv", "baseline_status.json", "*_config.json",
+                        "*_readout_selection.json", "warm_start_source_ablation.json"):
+            artifacts.extend(str(path.relative_to(RESULTS)) for path in out_h.glob(pattern))
+    payload = {
+        "schema_version": 2,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "horizons": horizons,
+        "architectures": {str(h): architectures[h] for h in horizons},
+        "calibrated_noise_rate": p_calibrated,
+        "primary_noise_rate": p_primary,
+        "authoritative_artifacts": sorted(set(artifacts)),
+        "legacy_artifacts_not_authoritative": [
+            "hamiltonian_sweep.csv", "best_hamiltonian.json", "best_topology.json",
+            "h*/readout_selection.json",
+        ],
+    }
+    path = RESULTS / "current_run_manifest.json"
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    logger.info("Current-run artifact manifest saved -> %s", path)
+    return path
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="ResQue QRC Pipeline")
     p.add_argument("--platform", default="local", choices=["local", "qbraid"],
@@ -186,6 +228,9 @@ def _select_warm_start_source(H_train, y_train, H_val, y_val,
                                     zip(target_names, best.val_rmse)},
             "readout_strategy": best.strategy,
             "ridge_lambda": best.lambda_,
+            "warm_prior_alpha": best.warm_prior_alpha,
+            "warm_prior_strength": best.warm_prior_strength,
+            "transfer_active": bool(best.warm_prior_alpha > 0),
             "n_aligned_train": n_align,
         })
 
@@ -193,12 +238,21 @@ def _select_warm_start_source(H_train, y_train, H_val, y_val,
         return None, None, []
     # WARM_START_SOURCES establishes deterministic tie-breaking.
     selected = min(candidates, key=lambda candidate: candidate["val_rmse_mean"])
+    # A zero selected prior is a valid negative result: no candidate source
+    # improved the cold ridge control under validation-only selection.
+    transfer_active = bool(selected["warm_prior_alpha"] > 0)
     with open(out_dir / "warm_start_source_ablation.json", "w") as f:
         json.dump({"selection_metric": "hybrid QRC mean validation RMSE",
-                   "candidates": candidates, "selected_source": selected["source"]}, f, indent=2)
-    logger.info("Warm-start-source selection: %s (hybrid val_rmse=%.4f)",
-                selected["source"], selected["val_rmse_mean"])
-    return selected["source"], fitted[selected["source"]], candidates
+                   "candidates": candidates,
+                   "selected_source": selected["source"] if transfer_active else None,
+                   "selected_candidate_source": selected["source"],
+                   "transfer_active": transfer_active}, f, indent=2)
+    if transfer_active:
+        logger.info("Warm-start-source selection: %s (hybrid val_rmse=%.4f)",
+                    selected["source"], selected["val_rmse_mean"])
+    else:
+        logger.info("Warm-start-source ablation selected no transfer prior; retaining the cold-ridge-equivalent control")
+    return (selected["source"] if transfer_active else None), fitted[selected["source"]], candidates
 
 
 def _train_horizon(h_val, ds, args, architecture, p_star):
@@ -337,7 +391,10 @@ def _train_horizon(h_val, ds, args, architecture, p_star):
                 val_rmse=rmse_per_target(y_vl, pred_val),
                 test_rmse=rmse_per_target(y_ts, pred_test),
                 meta={"type": mode_label, "readout_strategy": best.strategy,
-                      "warm_start_source": selected_warm_source if use_warm else None},
+                      "warm_start_source": selected_warm_source if use_warm else None,
+                      "warm_prior_alpha": best.warm_prior_alpha,
+                      "warm_prior_strength": best.warm_prior_strength,
+                      "transfer_active": bool(use_warm and best.warm_prior_alpha > 0)},
                 label_offset=w,
             )
             all_results[mode_label] = qrc_result
@@ -354,6 +411,9 @@ def _train_horizon(h_val, ds, args, architecture, p_star):
             cfg.update(horizon_hours=h_val, readout_strategy=best.strategy,
                        warm_start=use_warm,
                        warm_start_source=selected_warm_source if use_warm else None,
+                       warm_prior_alpha=best.warm_prior_alpha,
+                       warm_prior_strength=best.warm_prior_strength,
+                       transfer_active=bool(use_warm and best.warm_prior_alpha > 0),
                        shared_pca=USE_SHARED_PCA,
                        architecture_selection=architecture)
             with open(out_h / f"{mode_label}_config.json", "w") as f:
@@ -369,7 +429,8 @@ def run_pipeline(args):
     logger.info("=" * 70)
     logger.info("ResQue QRC Pipeline — GIC 2026")
     logger.info(f"Platform: {args.platform}  Smoke: {args.smoke_test}  Shared PCA: {USE_SHARED_PCA}")
-    logger.info(f"Reuploading: {USE_DATA_REUPLOADING}  Warm-start source: {WARM_START_SOURCE}")
+    logger.info("Encoding candidates: standard/data-reuploading  Warm-start sources: %s",
+                WARM_START_SOURCES)
     logger.info("=" * 70)
 
     from baselines.classical import ARIMA_AVAILABLE, TORCH_AVAILABLE
@@ -415,8 +476,8 @@ def run_pipeline(args):
             architectures[h_val] = _load_horizon_architecture(RESULTS, h_val)
         _, _, p_star, _ = _load_sweep_results(RESULTS)
     else:
-        from experiments.sweeps import (select_qrc_architecture, noise_sweep,
-                                         qubit_scaling_study, shot_ablation)
+        from experiments.sweeps import (select_qrc_architecture, topology_comparison,
+                                         noise_sweep, qubit_scaling_study, shot_ablation)
         for h_val in horizons:
             ds = datasets[h_val]
             X_q_tr, X_q_vl, _, _ = _model_inputs(ds, args.n_qubits)
@@ -433,6 +494,21 @@ def run_pipeline(args):
                     "use_data_reuploading": USE_DATA_REUPLOADING,
                     "topology": TOPOLOGY_PRIMARY,
                 }
+            # Report topology sensitivity at the selected encoding/J/h on the
+            # same fixed calibration subset.  It is deliberately an ablation,
+            # not a second selection stage that would invalidate the declared
+            # chain-constrained primary architecture.
+            try:
+                topology_comparison(
+                    X_q_tr, ds.y_train, X_q_vl, ds.y_val,
+                    J=architectures[h_val]["J"], h=architectures[h_val]["h"],
+                    n_qubits=args.n_qubits,
+                    use_data_reuploading=architectures[h_val]["use_data_reuploading"],
+                    out_dir=RESULTS,
+                    artifact_stem=f"topology_comparison_h{h_val}", horizon=h_val,
+                )
+            except Exception as e:
+                logger.error("Topology ablation failed for %sh: %s", h_val, e)
 
         ds_primary = datasets[h_primary]
         X_q_tr, X_q_vl, _, _ = _model_inputs(ds_primary, args.n_qubits)
@@ -498,6 +574,7 @@ def run_pipeline(args):
         except Exception as e:
             logger.error(f"Figure generation failed: {e}")
 
+    _write_run_manifest(horizons, architectures, p_star, p_primary)
     logger.info(f"\nPipeline complete in {(time.time()-start)/60:.1f} min. Outputs: {RESULTS}")
 
 

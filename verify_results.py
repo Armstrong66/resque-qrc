@@ -44,6 +44,7 @@ def _expected_files(horizons: list) -> dict:
     """Maps a human label to the Path expected to exist. Sweep-level files
     are expected once (not per horizon); per-horizon files repeat per h."""
     files = {
+        "current_run_manifest.json": RESULTS / "current_run_manifest.json",
         "noise_sweep.csv":       RESULTS / "noise_sweep.csv",
         "best_noise.json":       RESULTS / "best_noise.json",
         "qubit_scaling.csv":     RESULTS / "qubit_scaling.csv",
@@ -54,6 +55,10 @@ def _expected_files(horizons: list) -> dict:
         files[f"best_qrc_architecture_h{h}.json"] = RESULTS / f"best_qrc_architecture_h{h}.json"
         files[f"encoding_hamiltonian_comparison_h{h}.csv"] = (
             RESULTS / f"encoding_hamiltonian_comparison_h{h}.csv"
+        )
+        files[f"topology_comparison_h{h}.csv"] = RESULTS / f"topology_comparison_h{h}.csv"
+        files[f"topology_comparison_h{h}_summary.json"] = (
+            RESULTS / f"topology_comparison_h{h}_summary.json"
         )
         files[f"results_h{h}.csv"] = RESULTS / f"results_h{h}.csv"
         files[f"h{h}/baseline_status.json"] = out_h / "baseline_status.json"
@@ -75,6 +80,16 @@ def check_files_exist(horizons: list) -> dict:
     missing = [label for label, ok in present.items() if not ok]
     return {"present": present, "missing": missing,
            "n_expected": len(expected), "n_present": sum(present.values())}
+
+
+def check_legacy_artifacts() -> list[str]:
+    """List old protocol files that are deliberately non-authoritative."""
+    legacy = [
+        RESULTS / "hamiltonian_sweep.csv", RESULTS / "best_hamiltonian.json",
+        RESULTS / "best_topology.json",
+    ]
+    legacy.extend((RESULTS / f"h{h}" / "readout_selection.json") for h in HORIZONS)
+    return [str(path.relative_to(RESULTS)) for path in legacy if path.exists()]
 
 
 def check_no_nans(horizons: list) -> dict:
@@ -165,6 +180,7 @@ def verify_all(horizons: list = None, tolerance: float = DEFAULT_TOLERANCE) -> d
         "task": "verify_results", "status": status, "horizons": horizons,
         "files": files, "nan_checks": nans, "reference_comparison": reference,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "legacy_artifacts_not_authoritative": check_legacy_artifacts(),
     }
     RESULTS.mkdir(parents=True, exist_ok=True)
     with open(RESULTS / "verify_results_report.json", "w") as f:

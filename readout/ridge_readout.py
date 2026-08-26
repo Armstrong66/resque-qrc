@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import RIDGE_LAMBDAS, MULTIOUTPUT_MODES, RESULTS, RANDOM_SEED
+from config import (RIDGE_LAMBDAS, MULTIOUTPUT_MODES, RESULTS, RANDOM_SEED,
+                    WARM_START_PRIOR_ALPHAS)
 from utils import get_logger
 
 logger = get_logger(__name__)
@@ -37,6 +38,8 @@ class ReadoutResult:
     val_rmse:    np.ndarray       # Per-target RMSE on val set
     val_rmse_mean: float          # Scalar summary
     target_names: list = field(default_factory=list)
+    warm_prior_alpha: float = 0.0
+    warm_prior_strength: float = 0.0
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """X: (N, n_features) → y_pred: (N, n_targets)"""
@@ -148,13 +151,16 @@ class RidgeReadout:
     def __init__(self, target_names: list,
                  lambdas: list = None,
                  modes: list = None,
-                 warm_start: bool = True):
+                 warm_start: bool = True,
+                 warm_prior_alphas: list = None):
         self.target_names = target_names
         self.lambdas      = lambdas or RIDGE_LAMBDAS
         self.modes        = modes or list(MULTIOUTPUT_MODES)
         # Ensemble is built post-loop from best joint + independent
         self._fit_modes   = [m for m in self.modes if m != "ensemble"]
         self.warm_start   = warm_start
+        self.warm_prior_alphas = ((warm_prior_alphas or WARM_START_PRIOR_ALPHAS)
+                                  if warm_start else [0.0])
         self.best_result_: Optional[ReadoutResult] = None
         self._all_results_: list[ReadoutResult] = []
 
@@ -173,43 +179,37 @@ class RidgeReadout:
 
         for mode in self._fit_modes:
             for lam in self.lambdas:
+                for prior_alpha in self.warm_prior_alphas:
+                    if mode == "joint":
+                        W, prior_strength = self._fit_joint(
+                            X_train, y_train, lam, X_train_warm_start,
+                            warm=self.warm_start, prior_alpha=prior_alpha)
+                        val_pred = X_val @ W
+                        val_rmse = _rmse_per_target(y_val, val_pred)
+                        results.append(ReadoutResult(
+                            strategy="joint", warm_start=self.warm_start, lambda_=lam,
+                            W=W, val_rmse=val_rmse,
+                            val_rmse_mean=float(val_rmse.mean()), target_names=self.target_names,
+                            warm_prior_alpha=prior_alpha, warm_prior_strength=prior_strength,
+                        ))
 
-                if mode == "joint":
-                    W = self._fit_joint(X_train, y_train, lam,
-                                        X_train_warm_start, warm=self.warm_start)
-                    val_pred = X_val @ W
-                    val_rmse = _rmse_per_target(y_val, val_pred)
-                    results.append(ReadoutResult(
-                        strategy     = "joint",
-                        warm_start   = self.warm_start,
-                        lambda_      = lam,
-                        W            = W,
-                        val_rmse     = val_rmse,
-                        val_rmse_mean= float(val_rmse.mean()),
-                        target_names = self.target_names,
-                    ))
-
-                if mode == "independent":
-                    W_all = []
-                    for t in range(n_targets):
-                        W_t = self._fit_joint(
-                            X_train, y_train[:, t:t+1], lam,
-                            X_train_warm_start,
-                            warm=self.warm_start
-                        )
-                        W_all.append(W_t)
-                    W = np.concatenate(W_all, axis=1)
-                    val_pred = X_val @ W
-                    val_rmse = _rmse_per_target(y_val, val_pred)
-                    results.append(ReadoutResult(
-                        strategy     = "independent",
-                        warm_start   = self.warm_start,
-                        lambda_      = lam,
-                        W            = W,
-                        val_rmse     = val_rmse,
-                        val_rmse_mean= float(val_rmse.mean()),
-                        target_names = self.target_names,
-                    ))
+                    if mode == "independent":
+                        W_all = []
+                        prior_strength = 0.0
+                        for t in range(n_targets):
+                            W_t, prior_strength = self._fit_joint(
+                                X_train, y_train[:, t:t+1], lam, X_train_warm_start,
+                                warm=self.warm_start, prior_alpha=prior_alpha)
+                            W_all.append(W_t)
+                        W = np.concatenate(W_all, axis=1)
+                        val_pred = X_val @ W
+                        val_rmse = _rmse_per_target(y_val, val_pred)
+                        results.append(ReadoutResult(
+                            strategy="independent", warm_start=self.warm_start, lambda_=lam,
+                            W=W, val_rmse=val_rmse,
+                            val_rmse_mean=float(val_rmse.mean()), target_names=self.target_names,
+                            warm_prior_alpha=prior_alpha, warm_prior_strength=prior_strength,
+                        ))
 
         # ── Ensemble: average predictions of best independent + best joint ─
         # (Separate from the modes loop above - done after all individual fits)
@@ -230,6 +230,8 @@ class RidgeReadout:
                 val_rmse      = ens_rmse,
                 val_rmse_mean = float(ens_rmse.mean()),
                 target_names  = self.target_names,
+                warm_prior_alpha = 0.5 * (best_ind.warm_prior_alpha + best_joint.warm_prior_alpha),
+                warm_prior_strength = 0.5 * (best_ind.warm_prior_strength + best_joint.warm_prior_strength),
             )
             results.append(ens_result)
 
@@ -242,33 +244,42 @@ class RidgeReadout:
         return best
 
     def _fit_joint(self, X: np.ndarray, y: np.ndarray, lam: float,
-                   X_warm: Optional[np.ndarray], warm: bool) -> np.ndarray:
-        """Fit ridge; optionally warm-start from the configured classical model's weights."""
+                   X_warm: Optional[np.ndarray], warm: bool,
+                   prior_alpha: float = 0.0) -> tuple[np.ndarray, float]:
+        """Fit ridge with an optional, independently tuned transfer prior."""
         if warm and X_warm is not None:
+            if prior_alpha <= 0:
+                return _ridge_solve(X, y, lam), 0.0
             W_init = classical_warm_start_weights(X_warm, y, lam, X.shape[1])
-            # Incorporate warm-start: shift X by W_init contribution
-            # i.e. solve for residual δW around W_init
-            residual = y - X @ W_init
-            dW = _ridge_solve(X, residual, lam)
-            return (W_init + dW).astype(np.float32)
-        return _ridge_solve(X, y, lam)
+            # The prior strength is distinct from the ordinary ridge penalty.
+            feature_scale = float(np.trace(X.T @ X) / max(1, X.shape[1]))
+            prior_strength = float(prior_alpha * feature_scale)
+            system = X.T @ X + (lam + prior_strength) * np.eye(X.shape[1])
+            rhs = X.T @ y + prior_strength * W_init
+            try:
+                W = np.linalg.solve(system, rhs)
+            except np.linalg.LinAlgError:
+                W = np.linalg.pinv(system) @ rhs
+            return W.astype(np.float32), prior_strength
+        return _ridge_solve(X, y, lam), 0.0
 
     def _log_selection(self, all_results: list, best: ReadoutResult):
         """Transparently log the selection decision to console and log file."""
         logger.info("=" * 60)
         logger.info("READOUT SELECTION - val RMSE summary")
-        logger.info(f"{'Strategy':<14} {'WarmStart':<10} {'Lambda':<10} {'Val RMSE (mean)'}")
+        logger.info(f"{'Strategy':<14} {'WarmStart':<10} {'Lambda':<10} {'Prior a':<10} {'Val RMSE (mean)'}")
         logger.info("-" * 60)
         for r in sorted(all_results, key=lambda x: x.val_rmse_mean):
             marker = " [SELECTED]" if r is best else ""
             logger.info(
-                f"{r.strategy:<14} {str(r.warm_start):<10} {r.lambda_:<10.5g} "
+                f"{r.strategy:<14} {str(r.warm_start):<10} {r.lambda_:<10.5g} {r.warm_prior_alpha:<10.4g} "
                 f"{r.val_rmse_mean:.4f}{marker}"
             )
         logger.info("=" * 60)
         logger.info(
             f"Best: strategy={best.strategy} warm={best.warm_start} "
-            f"lambda={best.lambda_:.5g} val_rmse_mean={best.val_rmse_mean:.4f}"
+            f"lambda={best.lambda_:.5g} prior_alpha={best.warm_prior_alpha:.4g} "
+            f"prior_strength={best.warm_prior_strength:.4g} val_rmse_mean={best.val_rmse_mean:.4f}"
         )
         per_target = {t: f"{v:.4f}" for t, v in
                       zip(self.target_names, best.val_rmse)}
@@ -292,6 +303,8 @@ class RidgeReadout:
                 "strategy":       r.strategy,
                 "warm_start":     r.warm_start,
                 "lambda":         r.lambda_,
+                "warm_prior_alpha": r.warm_prior_alpha,
+                "warm_prior_strength": r.warm_prior_strength,
                 "val_rmse_mean":  r.val_rmse_mean,
                 "val_rmse_per_target": {t: float(v) for t, v
                                         in zip(r.target_names, r.val_rmse)},

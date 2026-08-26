@@ -169,6 +169,9 @@ MULTIOUTPUT_MODES = ["joint", "independent", "ensemble"]
 USE_WARM_START     = True
 WARM_START_SOURCE  = "esn"      # "esn" | "lstm" | "gru"
 WARM_START_SOURCES = ["esn", "lstm", "gru"]  # hybrid-QRC ablation order; ties keep ESN
+# Relative transferred-weight prior strengths. Zero is an explicit no-transfer
+# control; nonzero values are scaled by mean diag(X^T X) in the readout.
+WARM_START_PRIOR_ALPHAS = [0.0, 1e-4, 1e-3, 1e-2, 0.1, 1.0]
 ESN_HIDDEN_DIM     = 128        # Matched to QRC feature dimension (2 * n_qubits)
 
 # ── Classical baselines ───────────────────────────────────────────────────────
