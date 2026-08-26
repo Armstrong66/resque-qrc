@@ -1,8 +1,17 @@
-# Outputs (keep structure, not data)
-outputs/raw/
-outputs/processed/
-outputs/results/*.pkl
-outputs/logs/
+# Generated experiment artifacts
+#
+# Raw downloads, processed datasets, checkpoints, result tables, logs, and
+# figures are reproducible locally and must never be versioned.  Keeping the
+# entire output tree out of Git prevents a pull from overwriting an active
+# remote experiment (and keeps clone size independent of run history).
+outputs/
+
+# Data acquisition is implemented in data/downloader.py.  Do not commit local
+# source dumps or manually downloaded datasets outside outputs/ either.
+data/raw/
+data/processed/
+data/downloads/
+*.parquet
 
 # Python
 __pycache__/
